@@ -12,14 +12,14 @@ class ColbertRetrieval(BaseRetrieval):
 
     # create index for documents
     def prepare(self, dataset: BaseDataset):
-        samples = dataset.load_data()
+        samples = dataset.load_data(use_retreival=True)
         RAG = RAGPretrainedModel.from_pretrained("colbert-ir/colbertv2.0")
         # build doc_id : index_path pairs
         doc_index:dict = {}
         error = 0
         for sample in tqdm(samples):
             # if already have indrx file, continue
-            if self.r_text_index_key in sample and os.path.exists(sample[self.config.r_text_index_key]):
+            if self.config.r_text_index_key in sample and os.path.exists(sample[self.config.r_text_index_key]):
                 continue
             # for other samples with same doc_id, we already have index
             if sample[self.config.doc_key] in doc_index:
@@ -28,7 +28,7 @@ class ColbertRetrieval(BaseRetrieval):
             # first sample of this document
             content_list = dataset.load_processed_content(sample)
             text = [content.txt.replace("\n", "") for content in content_list]
-            print(text)
+            
             try:
                 index_path = RAG.index(index_name=dataset.config.name+ "-" + self.config.text_question_key + "-" + sample[self.config.doc_key], collection=text)
                 doc_index[sample[self.config.doc_key]] = index_path
@@ -41,12 +41,15 @@ class ColbertRetrieval(BaseRetrieval):
                     sys.exit(1)
                 print(f"Error processing {sample[self.config.doc_key]}: {e}")
                 sample[self.config.r_text_index_key] = ""
-
+            
+        dataset.dump_data(samples, use_retreival = True)
+            
+        return samples
 
 
     def find_top_k(self, dataset: BaseDataset, force_prepare=False):
         top_k = self.config.top_k
-        samples = dataset.load_data()
+        samples = dataset.load_data(use_retreival=True)
 
         # if we don't have index file, generate them
         if self.config.r_text_index_key not in samples[0] or force_prepare:

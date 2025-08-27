@@ -8,6 +8,7 @@ import importlib
 
 @hydra.main(config_path="../config", config_name="base", version_base="1.2")
 def main(cfg):
+    print(cfg.retrieval.r_text_index_key)
     os.environ["CUDA_VISIBLE_DEVICES"] = cfg.retrieval.cuda_visible_devices
     retrieval_class_path = cfg.retrieval.class_path
     module_name, class_name = retrieval_class_path.rsplit('.', 1)

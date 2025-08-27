@@ -22,12 +22,19 @@ class BaseDataset():
         current_time = datetime.now()
         self.time = current_time.strftime("%Y-%m-%d-%H-%M")
 
-    def load_data(self):
+    def load_data(self, use_retreival=True):
         path = self.config.sample_path
-        # ToDo: check retrieval, if we already retrieved, we can load the samples with retrievel result
+        if use_retreival:
+            try:
+                assert(os.path.exists(self.config.sample_with_retrieval_path))
+                path = self.config.sample_with_retrieval_path
+            except:
+                print("Use original sample path!")
+                
         assert(os.path.exists(path))
         with open(path, 'r') as f:
             samples = json.load(f)
+            
         return samples
         
     # MDocAgent text and image extract
@@ -82,3 +89,15 @@ class BaseDataset():
             content = file.read()
         content = content.replace('\r\n', ' ').replace('\r', ' ').replace('\n', ' ')
         return content[:max_length]
+
+    def dump_data(self, samples, use_retreival=True):
+        if use_retreival:
+            path = self.config.sample_with_retrieval_path
+        else:
+            path = self.config.sample_path
+
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            json.dump(samples, f, indent = 4)
+        
+        return path

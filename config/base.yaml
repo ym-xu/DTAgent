@@ -1,0 +1,11 @@
+
+run-name: baseline
+
+defaults:
+  - retrieval: text
+  - _self_
+
+dataset:
+  base_dir: ./../../../data/users/yiming/dtagent
+  use_top-k: 1
+

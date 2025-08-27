@@ -1,0 +1,20 @@
+name: base
+
+use_top-k: 1
+
+question_key: question
+
+gt_key: answer
+
+page_id_key: page_ids
+
+max_page: 1000
+
+data_dir: ${dataset.base_dir}/${dataset.name}
+
+extract_path: ${dataset.base_dir}/tmp/${dataset.name}
+
+document_path: ${dataset.base_dir}/${dataset.name}/documents
+
+sample_path: ${dataset.data_dir}/samples.json
+

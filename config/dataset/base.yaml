@@ -20,3 +20,5 @@ document_path: ${dataset.base_dir}/${dataset.name}/documents
 
 sample_path: ${dataset.data_dir}/samples.json
 
+sample_with_retrieval_path: ${dataset.data_dir}/sample-with-retrieval-results.json
+

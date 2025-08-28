@@ -9,3 +9,25 @@ dataset:
   base_dir: ./../../../data/users/yiming/dtagent
   use_top-k: 1
 
+retrieval:
+  top_k: 10 
+  cuda_visible_devices: '0'
+
+mdoc_agent:
+  cuda_visible_devices: '0,1,2,3'
+  truncate_len: null
+  save_freq: 10
+  ans_key: ans_${run-name}
+  save_message: false
+
+  agents:
+    - agent: image_agent
+      model: qwen2vl
+    - agent: text_agent
+      model: llama31
+    - agent: general_agent
+      model: qwen2vl
+  
+  sum_agent:
+    agent: sum_agent
+    model: qwen2vl

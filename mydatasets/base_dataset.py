@@ -16,8 +16,8 @@ class Content:
 class BaseDataset():
     def __init__(self, config):
         self.config = config
-        self.IMG_FILE = lambda doc_name,index: f"{self.config.extract_path}/{doc_name}_{index}.png"
-        self.TEXT_FILE = lambda doc_name,index: f"{self.config.extract_path}/{doc_name}_{index}.txt"
+        self.IMG_FILE = lambda doc_name,index: f"{self.config.extract_path}/page_image/{doc_name}_{index}.png"
+        self.TEXT_FILE = lambda doc_name,index: f"{self.config.extract_path}/page_text/{doc_name}_{index}.txt"
         self.EXTRACT_DOCUMENT_ID = lambda sample: re.sub("\\.pdf$", "", sample["doc_id"]).split("/")[-1] 
         current_time = datetime.now()
         self.time = current_time.strftime("%Y-%m-%d-%H-%M")
@@ -36,6 +36,11 @@ class BaseDataset():
             samples = json.load(f)
             
         return samples
+
+    # ToDo: read pdf, recover to dict/html, extract dom nodes, save to DOM_FILE
+    # build tree (block, hybrid): input pdf, output dict/html (tem/dataname/tree_method/doc_id.json/html and img_dir)
+    #   - change MdocAgent extraction: tem/dataname/{add page_text}/page_text.txt and tem/dataname/{add page_image}/page_text.txt
+    # extract_nodes: input dict/html, output json, save to DOM_FILE (tem/dataname/node_method/doc_id.json)
         
     # MDocAgent text and image extract
     def extract_content(self, resolution=144):
@@ -53,11 +58,13 @@ class BaseDataset():
             for index, page in enumerate(pdf[:max_pages]):
                 img_file = self.IMG_FILE(doc_name,index)
                 if not os.path.exists(img_file):
+                    os.makedirs(os.path.dirname(img_file), exist_ok=True)
                     im = page.get_pixmap(dpi=resolution)
                     im.save(img_file)
                 image_list.append(img_file)
                 txt_file = self.TEXT_FILE(doc_name,index)
                 if not os.path.exists(txt_file):
+                    os.makedirs(os.path.dirname(txt_file), exist_ok=True)
                     text = page.get_text("text")
                     with open(txt_file, 'w') as f:
                         f.write(text)
@@ -65,6 +72,7 @@ class BaseDataset():
         return image_list, text_list
 
     def load_processed_content(self, sample: dict, disable_load_image=True)->list[Content]:
+        # ToDo: check dom mode, download dom node json file, return text
         doc_name = self.EXTRACT_DOCUMENT_ID(sample)
         content_list = []
         for page_idx in range(self.config.max_page):
@@ -89,6 +97,12 @@ class BaseDataset():
             content = file.read()
         content = content.replace('\r\n', ' ').replace('\r', ' ').replace('\n', ' ')
         return content[:max_length]
+
+    # read json, return [node1, node2, ...], consider meta data
+    def load_dom_nodes(self, file):
+
+        return 
+
 
     def dump_data(self, samples, use_retreival=True):
         if use_retreival:

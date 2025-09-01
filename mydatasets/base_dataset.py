@@ -194,14 +194,19 @@ class BaseDataset():
         try:
             dom_agent.model.clean_up()
             dom_data = self.load_dom_nodes(dom_file_path)
-            updated_dom_data = dom_agent.process_dom_elements(pdf_file_path, dom_data)
             
+            # 获取文档名称和输出目录
+            base_name = os.path.splitext(os.path.basename(dom_file_path))[0]
             if hasattr(self.config, 'dom_output_path'):
-                base_name = os.path.splitext(os.path.basename(dom_file_path))[0]
-                output_path = os.path.join(self.config.dom_output_path, f"{base_name}_with_descriptions.json")
+                base_output_dir = self.config.dom_output_path
+                output_path = os.path.join(base_output_dir, f"{base_name}_with_descriptions.json")
             else:
                 base_path = os.path.splitext(dom_file_path)[0]
                 output_path = f"{base_path}_with_descriptions.json"
+                base_output_dir = os.path.dirname(output_path)
+            
+            # 处理DOM元素，包括保存图像
+            updated_dom_data = dom_agent.process_dom_elements(pdf_file_path, dom_data, base_name, base_output_dir)
             
             dom_agent.save_dom_with_descriptions(updated_dom_data, output_path)
             print(f"Saved updated DOM file: {output_path}")

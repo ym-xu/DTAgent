@@ -1,0 +1,24 @@
+defaults:
+  - mmlb
+  - _self_
+
+run-name: mmlb-dom-test
+
+# 启用DOM图像描述功能
+enable_dom_image_description: true
+
+# DOM测试配置
+dom_image_description:
+  cuda_visible_devices: '0'
+  agent: dom_image_agent
+  model: qwen2vl
+  
+  # 测试单个文件
+  dom_files:
+    - ${dataset.dom_path}/welcome-to-nus.json
+  pdf_files:
+    - ${dataset.document_path}/welcome-to-nus.pdf
+
+# 确保输出路径存在
+dataset:
+  dom_output_path: ./outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}/dom_with_descriptions

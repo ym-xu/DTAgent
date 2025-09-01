@@ -100,8 +100,39 @@ class BaseDataset():
 
     # read json, return [node1, node2, ...], consider meta data
     def load_dom_nodes(self, file):
+        """
+        从DOM JSON文件中加载节点数据
+        
+        Args:
+            file: DOM JSON文件路径
+            
+        Returns:
+            DOM数据字典
+        """
+        if not os.path.exists(file):
+            raise FileNotFoundError(f"DOM file not found: {file}")
+        
+        with open(file, 'r', encoding='utf-8') as f:
+            dom_data = json.load(f)
+        
+        return dom_data
 
-        return 
+    def get_dom_file_path(self, sample: dict) -> str:
+        """
+        获取样本对应的DOM文件路径
+        
+        Args:
+            sample: 数据样本字典
+            
+        Returns:
+            DOM文件路径
+        """
+        if hasattr(self.config, 'dom_path'):
+            doc_name = self.EXTRACT_DOCUMENT_ID(sample)
+            return os.path.join(self.config.dom_path, f"{doc_name}.json")
+        else:
+            raise AttributeError("dom_path not configured in dataset config")
+
 
 
     def dump_data(self, samples, use_retreival=True):

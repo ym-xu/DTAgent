@@ -5,11 +5,8 @@ defaults:
 
 run-name: mmlb-baseline
 
-# 启用DOM图像描述功能
-enable_dom_image_description: true
-
 # 针对MMLongBench的DOM配置覆盖
 dom_image_description:
   cuda_visible_devices: '0'
-  agent: dom_image_agent
+  agent: imgdes_agent
   model: qwen2vl

@@ -66,8 +66,9 @@ class DomImageAgent(Agent):
             # 裁剪图像
             temp_image_path = self.crop_image_from_pdf(pdf_path, page_num, outline)
             
-            # 构建问题
-            question = self.system_prompt + "\n\nPlease describe this image:"
+            # 构建问题，填入坐标信息
+            x1, y1, x2, y2 = outline
+            question = self.system_prompt.format(x1=x1, y1=y1, x2=x2, y2=y2)
             
             # 使用模型生成描述
             try:
@@ -101,11 +102,21 @@ class DomImageAgent(Agent):
         Returns:
             更新后的DOM数据字典
         """
-        elements = dom_data.get('elements', [])
-        
+        elements = dom_data.get('data', {}).get('elements', [])
         for element in elements:
             if element.get('type') == 'figure' and not element.get('description'):
-                print(f"Processing image element {element.get('index', 'unknown')} on page {element.get('page', 'unknown')}")
+                # 检查图像大小，跳过太小的图像
+                outline = element.get('outline', [])
+                if len(outline) >= 4:
+                    width = outline[2] - outline[0]
+                    height = outline[3] - outline[1]
+                    min_size = getattr(self.config.agent, 'min_image_size', 50)  # 默认最小尺寸50像素
+                    
+                    if width < min_size or height < min_size:
+                        print(f"Skipping small image element {element.get('index', 'unknown')} (size: {width}x{height})")
+                        continue
+                
+                # print(f"Processing image element {element.get('index', 'unknown')} on page {element.get('page', 'unknown')}")
                 
                 description = self.describe_dom_image(pdf_path, element)
                 element['description'] = description

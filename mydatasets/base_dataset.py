@@ -133,7 +133,88 @@ class BaseDataset():
         else:
             raise AttributeError("dom_path not configured in dataset config")
 
+    def process_dom_images(self, dom_agent, dom_config):
+        """
+        处理DOM文件中的图像元素，为其添加描述
+        
+        Args:
+            dom_agent: DomImageAgent实例
+            dom_config: DOM处理相关配置
+        """
+        if hasattr(dom_config, 'dom_files'):
+            dom_files = dom_config.dom_files
+            pdf_files = dom_config.pdf_files if hasattr(dom_config, 'pdf_files') else []
+            
+            if len(dom_files) != len(pdf_files):
+                print("Error: Number of DOM files and PDF files must match")
+                return
+            
+            for dom_file, pdf_file in zip(dom_files, pdf_files):
+                self._process_single_dom_file(dom_agent, dom_file, pdf_file, dom_config)
+        else:
+            dom_dir = self.config.dom_path
+            if not os.path.exists(dom_dir):
+                print(f"DOM directory not found: {dom_dir}")
+                return
+            
+            dom_files = [f for f in os.listdir(dom_dir) if f.endswith('.json')]
+            print(f"Found {len(dom_files)} DOM files in {dom_dir}")
+            
+            for dom_file in tqdm(dom_files, desc="Processing DOM files"):
+                try:
+                    dom_file_path = os.path.join(dom_dir, dom_file)
+                    pdf_name = dom_file.replace('.json', '.pdf')
+                    pdf_file_path = os.path.join(self.config.document_path, pdf_name)
+                    
+                    if not os.path.exists(pdf_file_path):
+                        print(f"PDF file not found: {pdf_file_path}")
+                        continue
+                    
+                    self._process_single_dom_file(dom_agent, dom_file_path, pdf_file_path, dom_config)
+                    
+                except Exception as e:
+                    print(f"Error processing DOM file {dom_file}: {e}")
+                    continue
+        
+        print("DOM image description extraction completed!")
 
+    def _process_single_dom_file(self, dom_agent, dom_file_path, pdf_file_path, dom_config):
+        """
+        处理单个DOM文件
+        
+        Args:
+            dom_agent: DomImageAgent实例
+            dom_file_path: DOM文件路径
+            pdf_file_path: 对应的PDF文件路径
+            dom_config: DOM处理配置
+        """
+        print(f"Processing DOM file: {dom_file_path}")
+        print(f"Corresponding PDF: {pdf_file_path}")
+        
+        try:
+            dom_agent.model.clean_up()
+            dom_data = self.load_dom_nodes(dom_file_path)
+            updated_dom_data = dom_agent.process_dom_elements(pdf_file_path, dom_data)
+            
+            if hasattr(self.config, 'dom_output_path'):
+                base_name = os.path.splitext(os.path.basename(dom_file_path))[0]
+                output_path = os.path.join(self.config.dom_output_path, f"{base_name}_with_descriptions.json")
+            else:
+                base_path = os.path.splitext(dom_file_path)[0]
+                output_path = f"{base_path}_with_descriptions.json"
+            
+            dom_agent.save_dom_with_descriptions(updated_dom_data, output_path)
+            print(f"Saved updated DOM file: {output_path}")
+            
+            elements = updated_dom_data.get('data', {}).get('elements', [])
+            figure_count = len([e for e in elements if e.get('type') == 'figure'])
+            described_count = len([e for e in elements if e.get('type') == 'figure' and e.get('description')])
+            
+            print(f"Processed {described_count}/{figure_count} figure elements")
+            
+        except Exception as e:
+            print(f"Error processing DOM file {dom_file_path}: {e}")
+            raise
 
     def dump_data(self, samples, use_retreival=True):
         if use_retreival:

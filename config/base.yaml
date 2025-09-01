@@ -12,14 +12,10 @@ dataset:
 retrieval:
   top_k: 10 
   cuda_visible_devices: '0'
-
-# DOM图像描述功能控制
-enable_dom_image_description: false
-
-# DOM图像描述配置
+  
 dom_image_description:
   cuda_visible_devices: '0'
-  agent: dom_image_agent
+  agent: imgdes_agent
   model: qwen2vl
 
 mdoc_agent:

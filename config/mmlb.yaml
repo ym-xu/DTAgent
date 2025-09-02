@@ -8,5 +8,15 @@ run-name: mmlb-baseline
 # 针对MMLongBench的DOM配置覆盖
 dom_image_description:
   cuda_visible_devices: '0'
-  agent: imgdes_agent
-  model: qwen2vl
+  agents:
+    - agent: imgdes_agent
+      model: qwen2vl
+
+# Block tree构建配置
+block_tree:
+  max_words: 512              # 单个block最大词数
+  min_words: 128               # 最小词数（过小则合并）
+  include_parent_context: true # 是否在子block中包含父章节标题
+  
+  input_path: ${dataset.base_dir}/tmp/${dataset.name}/tree_chatdoc_with_descriptions_path
+  output_path: ${dataset.base_dir}/tmp/${dataset.name}/blocks

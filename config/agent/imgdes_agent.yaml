@@ -30,5 +30,5 @@ system_prompt: |
 # 添加图像大小过滤配置
 min_image_size: 50  # 最小图像尺寸（像素）
 
-module_name: agents.dom_image_agent
+module_name: agents.imgdes_agent
 class_name: DomImageAgent

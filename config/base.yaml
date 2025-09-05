@@ -2,7 +2,7 @@
 run-name: baseline
 
 defaults:
-  - retrieval: text
+  - retrieval: block
   - _self_
 
 dataset:

@@ -24,6 +24,7 @@ def main(cfg):
     
     dataset = BaseDataset(cfg.dataset)
     dataset.process_dom_images(dom_agent, cfg.dom_image_description)
+    # print(cfg)
 
 if __name__ == "__main__":
     main()

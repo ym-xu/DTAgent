@@ -4,7 +4,7 @@ defaults:
 
 name: MMLongBench
 
-# Block tree构建配置
+# add block build
 block_tree:
   max_words: 256              # 单个block最大词数
   min_words: 64               # 最小词数（过小则合并）

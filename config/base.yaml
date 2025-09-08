@@ -13,6 +13,7 @@ retrieval:
   top_k: 10 
   cuda_visible_devices: '2'  # Use GPU 2 which is free
   
+# add for image des
 dom_image_description:
   cuda_visible_devices: '0'
   agent: imgdes_agent

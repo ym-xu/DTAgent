@@ -198,3 +198,5 @@ checkpoints/
 *.temp
 tmp/
 temp/
+
+mineru.py

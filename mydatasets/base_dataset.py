@@ -4,8 +4,10 @@ from dataclasses import dataclass
 import os
 from tqdm import tqdm
 import pymupdf
+import glob
 from PIL import Image
 from datetime import datetime
+
 
 @dataclass
 class Content:
@@ -21,6 +23,87 @@ class BaseDataset():
         self.EXTRACT_DOCUMENT_ID = lambda sample: re.sub("\\.pdf$", "", sample["doc_id"]).split("/")[-1] 
         current_time = datetime.now()
         self.time = current_time.strftime("%Y-%m-%d-%H-%M")
+
+    def enrich_content_with_layout(self, dom_files, layout_files):
+        """使用layout信息丰富content_list，为图像添加bbox信息"""
+        # 创建layout文件的字典，以目录为键
+        layout_dict = {}
+        for layout_file in layout_files:
+            layout_dir = os.path.dirname(layout_file)
+            layout_dict[layout_dir] = layout_file
+        
+        print(f"Found {len(layout_dict)} layout directories")
+        
+        # 处理每个content_list文件
+        success_count = 0
+        error_count = 0
+        
+        for dom_file in tqdm(dom_files, desc="Enriching content lists with layout info"):
+            try:
+                dom_dir_path = os.path.dirname(dom_file)
+                
+                # 找到对应的layout文件
+                if dom_dir_path in layout_dict:
+                    layout_file = layout_dict[dom_dir_path]
+                    
+                    # 加载layout数据
+                    with open(layout_file, 'r', encoding='utf-8') as f:
+                        layout = json.load(f)
+                    
+                    # 加载content_list数据
+                    with open(dom_file, 'r', encoding='utf-8') as f:
+                        content_list = json.load(f)
+                    
+                    # 提取layout信息
+                    layout_info = {}
+                    def recursive_search(obj):
+                        if isinstance(obj, dict):
+                            for key, value in obj.items():
+                                if key == "image_path" and isinstance(value, str):
+                                    if "bbox" in obj:
+                                        layout_info[value] = obj["bbox"]
+                                else:
+                                    recursive_search(value)
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                recursive_search(item)
+                    
+                    recursive_search(layout.get('pdf_info', layout))
+                    
+                    # 丰富content_list
+                    enriched_count = 0
+                    for item in content_list:
+                        if "img_path" in item:
+                            img_filename = item['img_path'].split('/')[-1]
+                            if img_filename in layout_info:
+                                item["outline"] = layout_info[img_filename]
+                                enriched_count += 1
+                            else:
+                                # 尝试部分匹配
+                                for layout_path, bbox in layout_info.items():
+                                    if img_filename in layout_path:
+                                        item["outline"] = bbox
+                                        enriched_count += 1
+                                        break
+                    
+                    # 保存丰富后的content_list
+                    with open(dom_file, 'w', encoding='utf-8') as f:
+                        json.dump(content_list, f, ensure_ascii=False, indent=2)
+                    
+                    if enriched_count > 0:
+                        print(f"Enriched {enriched_count} items in {os.path.basename(dom_file)}")
+                    success_count += 1
+                    
+                else:
+                    print(f"No layout file found for {dom_file}")
+                    error_count += 1
+                    
+            except Exception as e:
+                print(f"Error processing {dom_file}: {e}")
+                error_count += 1
+                continue
+        
+        print(f"\nEnrichment completed: {success_count} success, {error_count} errors")
 
     def load_data(self, use_retreival=True):
         path = self.config.sample_path
@@ -141,17 +224,7 @@ class BaseDataset():
             dom_agent: DomImageAgent实例
             dom_config: DOM处理相关配置
         """
-        if hasattr(dom_config, 'dom_files'):
-            dom_files = dom_config.dom_files
-            pdf_files = dom_config.pdf_files if hasattr(dom_config, 'pdf_files') else []
-            
-            if len(dom_files) != len(pdf_files):
-                print("Error: Number of DOM files and PDF files must match")
-                return
-            
-            for dom_file, pdf_file in zip(dom_files, pdf_files):
-                self._process_single_dom_file(dom_agent, dom_file, pdf_file, dom_config)
-        else:
+        if dom_config.dom_method == "chatdoc":
             dom_dir = self.config.dom_path
             if not os.path.exists(dom_dir):
                 print(f"DOM directory not found: {dom_dir}")
@@ -175,7 +248,36 @@ class BaseDataset():
                 except Exception as e:
                     print(f"Error processing DOM file {dom_file}: {e}")
                     continue
-        
+
+        elif dom_config.dom_method == "mineru":
+            dom_dir = self.config.dom_path
+            if not os.path.exists(dom_dir):
+                print(f"DOM directory not found: {dom_dir}")
+                return
+
+            dom_files = glob.glob(os.path.join(dom_dir, '**/*content_list.json'), recursive=True)
+            print(f"Found {len(dom_files)} DOM files in {dom_dir}")
+
+            layout_files = glob.glob(os.path.join(dom_dir, '**/*layout.json'), recursive=True)
+
+            self.enrich_content_with_layout(dom_files, layout_files)
+
+            for dom_file in tqdm(dom_files, desc="Processing DOM files"):
+                try:
+                    dom_file_path = os.path.join(dom_dir, dom_file)
+                    pdf_name = dom_file.split('/')[-2]
+                    pdf_file_path = os.path.join(self.config.document_path, pdf_name)
+                    
+                    if not os.path.exists(pdf_file_path):
+                        print(f"PDF file not found: {pdf_file_path}")
+                        continue
+                    
+                    self._process_single_dom_file(dom_agent, dom_file_path, pdf_file_path, dom_config)
+                    
+                except Exception as e:
+                    print(f"Error processing DOM file {dom_file}: {e}")
+                    continue
+            
         print("DOM image description extraction completed!")
 
     def _process_single_dom_file(self, dom_agent, dom_file_path, pdf_file_path, dom_config):

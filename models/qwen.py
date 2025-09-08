@@ -1,5 +1,9 @@
 from models.base_model import BaseModel
 from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, Qwen2_5_VLForConditionalGeneration, AutoTokenizer
+try:
+    from transformers import BitsAndBytesConfig
+except Exception:
+    BitsAndBytesConfig = None
 from qwen_vl_utils import process_vision_info
 import torch
 
@@ -7,10 +11,32 @@ class Qwen2VL(BaseModel):
     def __init__(self, config):
         super().__init__(config)
         max_pixels = 2048*28*28
+        # Read device and memory options from config
+        device_map = getattr(self.config, 'device_map', "balanced_low_0")
+        max_memory = getattr(self.config, 'max_memory', None)
+        torch_dtype = getattr(self.config, 'torch_dtype', "auto")
+
+        # Optional 8-bit / 4-bit quantization (requires bitsandbytes)
+        quantization_config = None
+        if BitsAndBytesConfig is not None:
+            if getattr(self.config, 'load_in_8bit', False):
+                quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+            elif getattr(self.config, 'load_in_4bit', False):
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type=getattr(self.config, 'bnb_4bit_quant_type', 'nf4'),
+                    bnb_4bit_compute_dtype=torch.float16,
+                )
+
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-            self.config.model_id, torch_dtype="auto", device_map="balanced_low_0"
+            self.config.model_id,
+            torch_dtype=torch_dtype,
+            device_map=device_map,
+            max_memory=max_memory,
+            low_cpu_mem_usage=True,
+            quantization_config=quantization_config,
         )
-        self.processor = AutoProcessor.from_pretrained(self.config.model_id) # , max_pixels=max_pixels
+        self.processor = AutoProcessor.from_pretrained(self.config.model_id)  # , max_pixels=max_pixels
         self.create_ask_message = lambda question: {
             "role": "user",
             "content": [

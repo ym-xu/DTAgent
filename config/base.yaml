@@ -11,16 +11,16 @@ dataset:
 
 retrieval:
   top_k: 10 
-  cuda_visible_devices: '2'  # Use GPU 2 which is free
+  cuda_visible_devices: '3'
   
 # add for image des
 dom_image_description:
-  cuda_visible_devices: '0'
+  cuda_visible_devices: '3'
   agent: imgdes_agent
   model: qwen2vl
 
 mdoc_agent:
-  cuda_visible_devices: '0,1,2,3'
+  cuda_visible_devices: '3'
   truncate_len: null
   save_freq: 10
   ans_key: ans_${run-name}

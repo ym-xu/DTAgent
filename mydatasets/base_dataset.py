@@ -7,6 +7,7 @@ import pymupdf
 import glob
 from PIL import Image
 from datetime import datetime
+from .block_builder import BlockBuilder
 
 
 @dataclass
@@ -85,6 +86,8 @@ class BaseDataset():
                                         item["outline"] = bbox
                                         enriched_count += 1
                                         break
+
+                        # 保持 MinerU 的原始页码索引（不做 +1）
                     
                     # 保存丰富后的content_list
                     with open(dom_file, 'w', encoding='utf-8') as f:
@@ -197,6 +200,8 @@ class BaseDataset():
         
         with open(file, 'r', encoding='utf-8') as f:
             dom_data = json.load(f)
+
+        
         
         return dom_data
 
@@ -255,7 +260,7 @@ class BaseDataset():
                 print(f"DOM directory not found: {dom_dir}")
                 return
 
-            dom_files = glob.glob(os.path.join(dom_dir, '**/*content_list.json'), recursive=True)
+            dom_files = glob.glob(os.path.join(dom_dir, '**', '*content_list.json'), recursive=True)
             print(f"Found {len(dom_files)} DOM files in {dom_dir}")
 
             layout_files = glob.glob(os.path.join(dom_dir, '**/*layout.json'), recursive=True)
@@ -264,8 +269,9 @@ class BaseDataset():
 
             for dom_file in tqdm(dom_files, desc="Processing DOM files"):
                 try:
-                    dom_file_path = os.path.join(dom_dir, dom_file)
-                    pdf_name = dom_file.split('/')[-2]
+                    # dom_file is already a full path; use it directly
+                    dom_file_path = dom_file
+                    pdf_name = os.path.basename(os.path.dirname(dom_file)) + '.pdf'
                     pdf_file_path = os.path.join(self.config.document_path, pdf_name)
                     
                     if not os.path.exists(pdf_file_path):
@@ -296,9 +302,13 @@ class BaseDataset():
         try:
             dom_agent.model.clean_up()
             dom_data = self.load_dom_nodes(dom_file_path)
+            # 统一 MinerU -> ChatDoc 字段格式
+            dom_data = self._normalize_mineru_to_chatdoc(dom_data, dom_config)
             
             # 获取文档名称和输出目录
             base_name = os.path.splitext(os.path.basename(dom_file_path))[0]
+            if base_name == 'content_list':
+                base_name = os.path.basename(os.path.dirname(dom_file_path))
             if hasattr(self.config, 'dom_output_path'):
                 base_output_dir = self.config.dom_output_path
                 output_path = os.path.join(base_output_dir, f"{base_name}_with_descriptions.json")
@@ -330,406 +340,11 @@ class BaseDataset():
         Args:
             block_config: block tree配置
         """
-        # 处理所有带描述的DOM文件
-        input_dir = block_config.input_path
-        output_dir = block_config.output_path
-        
-        if not os.path.exists(input_dir):
-            print(f"Input directory not found: {input_dir}")
-            return
-        
-        # 找到所有_with_descriptions.json文件
-        dom_files = [f for f in os.listdir(input_dir) if f.endswith('_with_descriptions.json')]
-        print(f"Found {len(dom_files)} DOM files to process")
-        
-        os.makedirs(output_dir, exist_ok=True)
-        
-        for dom_file in tqdm(dom_files, desc="Building block trees"):
-            try:
-                dom_file_path = os.path.join(input_dir, dom_file)
-                base_name = dom_file.replace('_with_descriptions.json', '')
-                output_path = os.path.join(output_dir, f"{base_name}_blocks.json")
-                
-                self._process_single_dom_to_blocks(dom_file_path, output_path, block_config)
-                
-            except Exception as e:
-                print(f"Error processing {dom_file}: {e}")
-                continue
-        
-        print("Block tree construction completed!")
+        # Delegate to dedicated builder for maintainability
+        builder = BlockBuilder(self)
+        builder.build_block_tree(block_config)
 
-    def _process_single_dom_to_blocks(self, dom_file_path, output_path, block_config):
-        """
-        处理单个DOM文件，构建blocks
-        
-        Args:
-            dom_file_path: DOM文件路径
-            output_path: 输出路径
-            block_config: 配置
-        """
-        print(f"Processing: {dom_file_path}")
-        
-        # 加载DOM数据
-        dom_data = self.load_dom_nodes(dom_file_path)
-        elements = dom_data.get('data', {}).get('elements', [])
-        doc_name = os.path.splitext(os.path.basename(dom_file_path))[0].replace('_with_descriptions', '')
-        
-        # 分析章节层级结构
-        chapter_hierarchy = self._analyze_chapter_hierarchy(elements)
-        
-        # 找到叶子章节
-        leaf_chapters = self._find_leaf_chapters(chapter_hierarchy)
-        
-        # 构建blocks
-        blocks = self._build_chapter_blocks(elements, leaf_chapters, chapter_hierarchy, block_config)
-        
-        # 处理孤立元素（parent_chapter=-1且非标题）
-        orphan_blocks = self._handle_orphan_elements(elements, block_config)
-        blocks.extend(orphan_blocks)
-        
-        # 保存结果
-        result = {
-            "metadata": {
-                "doc_name": doc_name,
-                "total_blocks": len(blocks),
-                "total_elements": len(elements),
-                "build_config": {
-                    "max_words": block_config.max_words,
-                    "min_words": block_config.min_words,
-                    "include_parent_context": block_config.include_parent_context
-                },
-                "timestamp": self.time
-            },
-            "blocks": blocks
-        }
-        
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(result, f, indent=2, ensure_ascii=False)
-        
-        print(f"Created {len(blocks)} blocks -> {output_path}")
-
-    def _analyze_chapter_hierarchy(self, elements):
-        """
-        分析章节层级结构
-        
-        Args:
-            elements: DOM元素列表
-            
-        Returns:
-            dict: {chapter_id: {"title": str, "parent": int, "children": list}}
-        """
-        hierarchy = {}
-        
-        # 收集所有章节标题
-        for element in elements:
-            if element.get('is_chapter_title'):
-                chapter_id = element['index']
-                hierarchy[chapter_id] = {
-                    "title": element['text'],
-                    "parent": element['parent_chapter'],
-                    "children": [],
-                    "element": element
-                }
-        
-        # 建立父子关系
-        for chapter_id, info in hierarchy.items():
-            parent_id = info['parent']
-            if parent_id != -1 and parent_id in hierarchy:
-                hierarchy[parent_id]['children'].append(chapter_id)
-        
-        return hierarchy
-
-    def _find_leaf_chapters(self, chapter_hierarchy):
-        """
-        找到叶子章节（没有子章节的最底层章节）
-        
-        Args:
-            chapter_hierarchy: 章节层级结构
-            
-        Returns:
-            list: 叶子章节ID列表
-        """
-        leaf_chapters = []
-        
-        for chapter_id, info in chapter_hierarchy.items():
-            if not info['children']:  # 没有子章节
-                leaf_chapters.append(chapter_id)
-        
-        return leaf_chapters
-
-    def _build_chapter_blocks(self, elements, leaf_chapters, chapter_hierarchy, block_config):
-        """
-        为所有章节构建blocks（修复版本：不再只处理叶子章节）
-        
-        Args:
-            elements: DOM元素列表
-            leaf_chapters: 叶子章节列表（保留参数兼容性，但不再使用）
-            chapter_hierarchy: 章节层级结构
-            block_config: 配置
-            
-        Returns:
-            list: blocks列表
-        """
-        blocks = []
-        
-        # 修复：处理所有章节，而不是只处理叶子章节
-        all_chapters = list(chapter_hierarchy.keys())
-        for chapter_id in all_chapters:
-            chapter_elements = self._get_chapter_elements(elements, chapter_id)
-            
-            if not chapter_elements:
-                continue
-                
-            word_count = self._calculate_word_count(chapter_elements)
-            
-            if word_count <= block_config.max_words:
-                # 创建单个block
-                block = self._create_block(
-                    f"chapter_{chapter_id}",
-                    chapter_elements,
-                    chapter_hierarchy,
-                    chapter_id
-                )
-                blocks.append(block)
-            else:
-                # 分割成多个blocks
-                sub_blocks = self._split_large_chapter(
-                    chapter_id, 
-                    chapter_elements, 
-                    chapter_hierarchy,
-                    block_config
-                )
-                blocks.extend(sub_blocks)
-        
-        return blocks
-
-    def _get_chapter_elements(self, elements, chapter_id):
-        """
-        获取属于指定章节的直接内容元素（修复版本：避免重复收集子章节内容）
-        
-        Args:
-            elements: DOM元素列表
-            chapter_id: 章节ID
-            
-        Returns:
-            list: 属于该章节的直接内容元素列表
-        """
-        # 先找到该章节的所有直接子章节ID
-        child_chapter_ids = set()
-        for element in elements:
-            if element.get('is_chapter_title') and element.get('parent_chapter') == chapter_id:
-                child_chapter_ids.add(element['index'])
-        
-        chapter_elements = []
-        
-        for element in elements:
-            # 章节标题本身
-            if element.get('is_chapter_title') and element['index'] == chapter_id:
-                chapter_elements.append(element)
-            # 属于该章节的直接内容元素（排除子章节标题，因为子章节会单独处理）
-            elif (element.get('parent_chapter') == chapter_id and 
-                  element['index'] not in child_chapter_ids):
-                chapter_elements.append(element)
-        
-        # 按索引排序
-        chapter_elements.sort(key=lambda x: x['index'])
-        return chapter_elements
-
-    def _calculate_word_count(self, elements):
-        """
-        计算元素列表的总词数（使用原始词数统计）
-        
-        Args:
-            elements: 元素列表
-            
-        Returns:
-            int: 总词数
-        """
-        total_words = 0
-        
-        for element in elements:
-            # 计算文本词数（text + description）
-            text = element.get('text', '') + ' ' + element.get('description', '')
-            raw_words = len(text.split())
-            total_words += raw_words
-        
-        return int(total_words)
-
-    def _create_block(self, block_id, elements, chapter_hierarchy, chapter_id):
-        """
-        创建单个block
-        
-        Args:
-            block_id: block ID
-            elements: 元素列表
-            chapter_hierarchy: 章节层级结构
-            chapter_id: 章节ID
-            
-        Returns:
-            dict: block数据
-        """
-        # 构建父章节路径
-        parent_path = self._build_parent_path(chapter_hierarchy, chapter_id)
-        
-        # 统计信息
-        text_count = len([e for e in elements if e.get('type') == 'paragraph'])
-        figure_count = len([e for e in elements if e.get('type') == 'figure'])
-        table_count = len([e for e in elements if e.get('type') == 'table'])
-        
-        # 页面范围
-        pages = [e.get('page', 0) for e in elements]
-        page_range = [min(pages), max(pages)] if pages else [0, 0]
-        
-        return {
-            "block_id": block_id,
-            "block_type": "chapter_section",
-            "title": chapter_hierarchy[chapter_id]['title'],
-            "parent_path": parent_path,
-            "word_count": self._calculate_word_count(elements),
-            "element_count": len(elements),
-            "content_stats": {
-                "text_count": text_count,
-                "figure_count": figure_count,
-                "table_count": table_count
-            },
-            "page_range": page_range,
-            "elements": elements
-        }
-
-    def _build_parent_path(self, chapter_hierarchy, chapter_id):
-        """
-        构建父章节路径
-        
-        Args:
-            chapter_hierarchy: 章节层级结构
-            chapter_id: 章节ID
-            
-        Returns:
-            list: 从根到当前章节的路径
-        """
-        path = []
-        current_id = chapter_id
-        
-        while current_id != -1 and current_id in chapter_hierarchy:
-            path.insert(0, chapter_hierarchy[current_id]['title'])
-            current_id = chapter_hierarchy[current_id]['parent']
-        
-        return path
-
-    def _split_large_chapter(self, chapter_id, elements, chapter_hierarchy, block_config):
-        """
-        分割超长章节
-        
-        Args:
-            chapter_id: 章节ID
-            elements: 元素列表
-            chapter_hierarchy: 章节层级结构
-            block_config: 配置
-            
-        Returns:
-            list: 分割后的blocks
-        """
-        # 获取章节标题
-        title_element = None
-        content_elements = []
-        
-        for element in elements:
-            if element.get('is_chapter_title') and element['index'] == chapter_id:
-                title_element = element
-            else:
-                content_elements.append(element)
-        
-        if not title_element:
-            return []
-        
-        blocks = []
-        current_elements = [title_element] if block_config.get('include_parent_context', True) else []
-        current_words = self._calculate_word_count(current_elements)
-        part_num = 1
-        
-        for element in content_elements:
-            element_words = self._calculate_word_count([element])
-            
-            if current_words + element_words <= block_config.max_words:
-                current_elements.append(element)
-                current_words += element_words
-            else:
-                # 创建当前block
-                if len(current_elements) > 0:
-                    block = self._create_block(
-                        f"chapter_{chapter_id}_part_{part_num}",
-                        current_elements,
-                        chapter_hierarchy,
-                        chapter_id
-                    )
-                    blocks.append(block)
-                
-                # 开始新block
-                part_num += 1
-                current_elements = [title_element] if block_config.get('include_parent_context', True) else []
-                current_elements.append(element)
-                current_words = self._calculate_word_count(current_elements)
-        
-        # 处理最后一个block
-        if len(current_elements) > 0:
-            block = self._create_block(
-                f"chapter_{chapter_id}_part_{part_num}",
-                current_elements,
-                chapter_hierarchy,
-                chapter_id
-            )
-            blocks.append(block)
-        
-        return blocks
-
-    def _handle_orphan_elements(self, elements, block_config):
-        """
-        处理孤立元素（parent_chapter=-1且非标题）
-        
-        Args:
-            elements: DOM元素列表
-            block_config: 配置
-            
-        Returns:
-            list: orphan blocks
-        """
-        orphan_elements = [
-            e for e in elements 
-            if e.get('parent_chapter') == -1 and not e.get('is_chapter_title')
-        ]
-        
-        if not orphan_elements:
-            return []
-        
-        # 按页面分组孤立元素
-        page_groups = {}
-        for element in orphan_elements:
-            page = element.get('page', 0)
-            if page not in page_groups:
-                page_groups[page] = []
-            page_groups[page].append(element)
-        
-        blocks = []
-        for page, page_elements in page_groups.items():
-            # 为每页的孤立元素创建block
-            block = {
-                "block_id": f"orphan_page_{page}",
-                "block_type": "orphan_content",
-                "title": f"Page {page} Content",
-                "parent_path": [],
-                "word_count": self._calculate_word_count(page_elements),
-                "element_count": len(page_elements),
-                "content_stats": {
-                    "text_count": len([e for e in page_elements if e.get('type') == 'paragraph']),
-                    "figure_count": len([e for e in page_elements if e.get('type') == 'figure']),
-                    "table_count": len([e for e in page_elements if e.get('type') == 'table'])
-                },
-                "page_range": [page, page],
-                "elements": page_elements
-            }
-            blocks.append(block)
-        
-        return blocks
+    
 
     def load_blocks_with_mapping(self, doc_name):
         """
@@ -800,3 +415,89 @@ class BaseDataset():
             json.dump(samples, f, indent = 4)
         
         return path
+
+    def _normalize_mineru_to_chatdoc(self, dom_data, dom_config):
+        """
+        将 MinerU 的 content_list 结构规范化为 ChatDoc 风格：
+        - 外层统一为 {"data": {"elements": [...]}}
+        - 字段映射：type=image->figure, text->paragraph；page_idx/page_index/pageNo -> page(0-based)
+        - 坐标：若无 outline 且存在 bbox/outline，则确保 outline 为 [x0,y0,x1,y1]
+        - 填充默认：is_chapter_title=False, parent_chapter=-1, rotation=0.0, index（缺失则按序补齐）
+        若 dom_method 非 mineru 或数据已是 ChatDoc 风格，直接原样返回。
+        """
+        try:
+            if getattr(dom_config, 'dom_method', '') != 'mineru':
+                return dom_data
+
+            # 拿到元素列表
+            if isinstance(dom_data, list):
+                elements = dom_data
+            elif isinstance(dom_data, dict):
+                maybe = dom_data.get('data', {}).get('elements')
+                if isinstance(maybe, list):
+                    return dom_data  # 已是 ChatDoc 风格
+                elements = dom_data.get('elements') if isinstance(dom_data.get('elements'), list) else []
+            else:
+                elements = []
+
+            if not isinstance(elements, list) or not elements:
+                return {"data": {"elements": []}}
+
+            normalized = []
+            for i, e in enumerate(elements):
+                if not isinstance(e, dict):
+                    continue
+                ne = dict(e)
+
+                # type 映射
+                t = ne.get('type')
+                if t == 'image':
+                    ne['type'] = 'figure'
+                elif t == 'text':
+                    ne['type'] = 'paragraph'
+
+                # 坐标标准化
+                if 'outline' in ne and isinstance(ne['outline'], (list, tuple)) and len(ne['outline']) == 4:
+                    ne['outline'] = list(ne['outline'])
+                elif 'bbox' in ne and isinstance(ne['bbox'], (list, tuple)) and len(ne['bbox']) == 4:
+                    ne['outline'] = list(ne['bbox'])
+
+                # 页码统一到 0-based 的 page
+                if 'page' not in ne:
+                    if 'page_idx' in ne:
+                        try:
+                            ne['page'] = max(int(ne['page_idx']), 0)
+                        except Exception:
+                            ne['page'] = 0
+                    elif 'page_index' in ne:
+                        try:
+                            ne['page'] = int(ne['page_index'])
+                        except Exception:
+                            ne['page'] = 0
+                    elif 'pageNo' in ne:
+                        try:
+                            ne['page'] = int(ne['pageNo'])
+                        except Exception:
+                            ne['page'] = 0
+
+                # 默认值
+                ne.setdefault('is_chapter_title', False)
+                ne.setdefault('parent_chapter', -1)
+                ne.setdefault('rotation', 0.0)
+                ne.setdefault('index', i)
+
+                # figure 的 text 补充 image_caption
+                if ne.get('type') == 'figure' and 'text' not in ne:
+                    cap = ne.get('image_caption')
+                    if isinstance(cap, list):
+                        ne['text'] = '\n'.join([str(c) for c in cap if c is not None])
+                    elif isinstance(cap, str):
+                        ne['text'] = cap
+                    else:
+                        ne['text'] = ''
+
+                normalized.append(ne)
+
+            return {"data": {"elements": normalized}}
+        except Exception:
+            return dom_data

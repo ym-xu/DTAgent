@@ -91,7 +91,9 @@ class DomImageAgent(Agent):
         Returns:
             图像描述文本
         """
-        if element.get('type') != 'figure':
+        # Accept unified 'figure' type (MinerU has been normalized),
+        # but allow 'image' for robustness during transition
+        if element.get('type') not in ('figure', 'image'):
             return ""
         
         try:

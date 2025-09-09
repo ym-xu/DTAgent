@@ -227,10 +227,12 @@ CLI behavior
   - Overwrite: add `--in-place`.
 
 Agreed but NOT implemented yet
-- Normalize `caption` field for image/table (retain original fields).
-- Extract `table_text` (plain-text preview) from `table_body` HTML.
 - Flat DocTree builder (Document root with linear children) and serialization to `doctree.json`.
 - Optional extraction of `equation_id` from LaTeX `\tag{...}`.
+
+Update (2025-09-09)
+- Implemented: `table_text` extraction from `table_body` as Markdown when possible (falls back to plain text).
+- Dropped: caption normalization; keep original caption-related fields as-is.
 
 Out of scope for now (later with heuristics/LLM)
 - Title/section detection, TOC extraction, list nesting via stack, figure/table caption pairing, code block refinement.

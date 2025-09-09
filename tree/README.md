@@ -4,6 +4,7 @@ Overview
 - Purpose: Normalize and enrich MinerU content_list for later MM DocTree building.
 - Scope now: Deterministic adapter only; no TOC/heading/caption detection yet.
 - Key additions: node_idx, node_level (rename), outline/bbox for images/tables, optional OCR/LLM hooks.
+  Also extracts Markdown preview for tables.
 
 What It Does
 - Adds `node_idx` sequentially (0..n-1).
@@ -12,6 +13,7 @@ What It Does
 - Enriches `image`/`table` items with `outline` (bbox) from `layout.json` by image filename matching.
 - Provides optional hooks for OCR and LLM description (not enabled by default).
 - Ensures `image` items always contain `text` and `description` fields (empty if OCR/LLM not used).
+- Extracts `table_text` from `table_body` HTML as Markdown when possible; falls back to plain text.
 
 Input Example (MinerU content_list)
 ```
@@ -77,7 +79,8 @@ Output Example (adapted)
     "page_idx": 24,
     "node_level": -1,
     "node_idx": 2,
-    "outline": [x0, y0, x1, y1]
+    "outline": [x0, y0, x1, y1],
+    "table_text": "| Col1 | Col2 |\n| --- | --- |\n| v1 | v2 |"  
   },
   {
     "type": "equation",

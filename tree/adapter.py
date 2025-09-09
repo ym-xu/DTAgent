@@ -3,7 +3,7 @@ import json
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .utils import load_json, dump_json
+from .utils import load_json, dump_json, html_table_to_markdown
 
 
 DEFAULT_SUFFIX = ".adapted.json"
@@ -135,6 +135,16 @@ def adapt_content_list(
                 # Ensure keys exist for downstream consumers
                 it.setdefault("text", "")
                 it.setdefault("description", "")
+            elif typ == "table":
+                # Derive a markdown preview from table_body when available
+                tb = it.get("table_body")
+                if isinstance(tb, str):
+                    try:
+                        md = html_table_to_markdown(tb)
+                        if md:
+                            it.setdefault("table_text", md)
+                    except Exception:
+                        pass
 
         adapted.append(it)
 

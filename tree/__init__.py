@@ -15,12 +15,20 @@ from .adapter import (
     enrich_content_with_layout,
     process_directory,
 )
+from .builder import (
+    build_flat_doctree,
+    build_single as build_doctree_single,
+    build_directory as build_doctree_directory,
+)
 
 __all__ = [
     "adapt_content_list",
     "adapt_single_file",
     "enrich_content_with_layout",
     "process_directory",
+    "build_flat_doctree",
+    "build_doctree_single",
+    "build_doctree_directory",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

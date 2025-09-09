@@ -3,7 +3,7 @@ MM DocTree Adapter (MinerU content_list)
 Overview
 - Purpose: Normalize and enrich MinerU content_list for later MM DocTree building.
 - Scope now: Deterministic adapter only; no TOC/heading/caption detection yet.
-- Key additions: node_idx, node_level (rename), outline/bbox for images/tables, optional OCR/LLM hooks.
+- Key additions: node_idx, node_level (rename), outline/bbox for images/tables, optional OCR/LLM hooks. Also extracts Markdown preview for tables.
   Also extracts Markdown preview for tables.
 
 What It Does
@@ -126,6 +126,32 @@ adapt_single_file(
     write_in_place=True,
 )
 ```
+
+Flat DocTree Builder
+- Purpose: Turn adapted `content_list` into a flat `doctree.json` per PDF directory for downstream retrieval/visualization.
+- CLI:
+  - Directory mode: `python -m tree.builder --in-dir /path/to/MinerU_MMLB`
+    - Writes `/dir/of/pdf/doctree.json` for each document directory.
+    - Customize output name: `--suffix ".flat.json"` → `doctree.flat.json`.
+    - Prefer adapted inputs via `--adapted-suffix ".adapted.json"` (default).
+  - Single file: `python -m tree.builder --in-file /dir/content_list.adapted.json --out /dir/doctree.json`
+- DocTree root schema (minimal):
+  - `type: "document"`
+  - `doc_id`: directory name of the PDF folder
+  - `source_path`: directory path
+  - `children`: flat list of nodes in reading order
+  - `indices` (enabled by default):
+    - `by_page: {page_idx -> [node_idx...]}`
+    - `by_type: {type -> [node_idx...]}`
+    - `id_to_idx: {"{doc_id}#{node_idx}" -> node_idx}`
+  - Note: JSON keys are strings; `by_page` keys originate as ints and will be serialized as JSON object keys.
+
+Children schema (selected fields):
+- Common: `type`, `node_id`, `node_idx`, `page_idx`, `node_level`
+- Text: `text`
+- Image: `img_path`, `outline?`, `text`, `description`
+- Table: `img_path?`, `outline?`, `table_body`, `table_text?`
+- Equation: `text`, `text_format?`
 
 Layout → outline extraction
 - Searches `layout.json` (or `layout['pdf_info']` when present) recursively for entries with `image_path` and sibling `bbox`.

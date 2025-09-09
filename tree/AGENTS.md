@@ -234,6 +234,11 @@ Update (2025-09-09)
 - Implemented: `table_text` extraction from `table_body` as Markdown when possible (falls back to plain text).
 - Dropped: caption normalization; keep original caption-related fields as-is.
 
+Added Flat DocTree builder
+- New CLI: `python -m tree.builder --in-dir DIR` or `--in-file FILE`
+- Output: `doctree.json` per PDF directory (no in-place overwrite of MinerU files)
+- doc_id = directory name; indices enabled by default (by_page, by_type, id_to_idx)
+
 Out of scope for now (later with heuristics/LLM)
 - Title/section detection, TOC extraction, list nesting via stack, figure/table caption pairing, code block refinement.
 

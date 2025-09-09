@@ -481,9 +481,9 @@ class BaseDataset():
                             ne['page'] = 0
 
                 # 默认值
-                ne.setdefault('is_chapter_title', False)
-                ne.setdefault('parent_chapter', -1)
-                ne.setdefault('rotation', 0.0)
+                # ne.setdefault('is_chapter_title', False)
+                # ne.setdefault('parent_chapter', -1)
+                # ne.setdefault('rotation', 0.0)
                 ne.setdefault('index', i)
 
                 # figure 的 text 补充 image_caption

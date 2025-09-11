@@ -153,6 +153,51 @@ Children schema (selected fields):
 - Table: `img_path?`, `outline?`, `table_body`, `table_text?`
 - Equation: `text`, `text_format?`
 
+Page Refinement APIs (LLM-assisted, no CLI)
+- Goal: Apply page-level refinements (reorder, relevel, optional merge/add title) via LLM outputs while keeping the final doctree flat schema unchanged.
+- Two paths are supported:
+  - Plan path (recommended): model outputs a strict plan object `{page_idx, items, merges?, virtual_titles?}`; we validate and apply it.
+  - Jsonlist path (simple): model outputs an array `[{node_id, level}]` for reorder + relevel only.
+- Example (plan path):
+  ```python
+  import json
+  from tree import (
+      build_page_payload,
+      render_plan_prompt,
+      validate_and_normalize_plan,
+      apply_plan_to_document,
+  )
+
+  root = json.load(open('/path/to/doctree.json','r',encoding='utf-8'))
+  page_idx = 11
+  payload = build_page_payload(root, page_idx, page_image_ref=None)
+  prompt = render_plan_prompt(payload, level_max=4)
+
+  # Call your model with the prompt; suppose `raw` is the JSON string response
+  ok, plan, errs = validate_and_normalize_plan(
+      json.loads(raw),
+      allowed_ids=[e['node_id'] for e in payload['elements']],
+      types_by_id={e['node_id']: e['type'] for e in payload['elements']},
+      page_idx=page_idx,
+      level_max=4,
+  )
+  assert ok, errs
+  new_root = apply_plan_to_document(root, page_idx, plan)
+  ```
+- Example (jsonlist path):
+  ```python
+  from tree import validate_and_normalize_jsonlist, apply_nodes_to_document
+  ok, items, errs = validate_and_normalize_jsonlist(
+      json.loads(raw),
+      allowed_ids=[e['node_id'] for e in payload['elements']],
+      level_max=4,
+  )
+  assert ok, errs
+  # Derive page nodes yourself or let the model output standard nodes, then:
+  new_root = apply_nodes_to_document(root, page_idx, page_nodes)
+  ```
+- See demo notebook: `tree/page_refine_demo.ipynb`.
+
 Layout → outline extraction
 - Searches `layout.json` (or `layout['pdf_info']` when present) recursively for entries with `image_path` and sibling `bbox`.
 - Builds an index and matches by image filename (basename). If exact match fails, uses partial path inclusion as fallback.

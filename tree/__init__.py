@@ -20,6 +20,30 @@ from .builder import (
     build_single as build_doctree_single,
     build_directory as build_doctree_directory,
 )
+from .page_payload import build_page_payload
+from .page_plan import (
+    validate_and_normalize_jsonlist,
+    validate_and_normalize_plan,
+)
+from .refine_apply import (
+    apply_items_order_and_levels,
+    apply_merges,
+    apply_virtual_titles,
+    replace_page_children,
+    apply_plan_to_document,
+    apply_nodes_to_document,
+)
+from .llm_providers import (
+    ProviderConfig,
+    BaseProvider,
+    QwenProvider,
+    GPTProvider,
+    MockProvider,
+)
+from .prompts import (
+    render_plan_prompt,
+    render_jsonlist_prompt,
+)
 
 __all__ = [
     "adapt_content_list",
@@ -29,6 +53,22 @@ __all__ = [
     "build_flat_doctree",
     "build_doctree_single",
     "build_doctree_directory",
+    "build_page_payload",
+    "validate_and_normalize_jsonlist",
+    "validate_and_normalize_plan",
+    "apply_items_order_and_levels",
+    "apply_merges",
+    "apply_virtual_titles",
+    "replace_page_children",
+    "apply_plan_to_document",
+    "apply_nodes_to_document",
+    "ProviderConfig",
+    "BaseProvider",
+    "QwenProvider",
+    "GPTProvider",
+    "MockProvider",
+    "render_plan_prompt",
+    "render_jsonlist_prompt",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

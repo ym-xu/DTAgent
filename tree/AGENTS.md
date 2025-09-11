@@ -234,6 +234,15 @@ Update (2025-09-09)
 - Implemented: `table_text` extraction from `table_body` as Markdown when possible (falls back to plain text).
 - Dropped: caption normalization; keep original caption-related fields as-is.
 
+Update (2025-09-11)
+- Added page-level refinement APIs (no CLI):
+  - `page_payload.py`: build compact payload for a page (elements with node_id/type/snippet/outline).
+  - `page_plan.py`: validate and normalize model outputs (plan/jsonlist).
+  - `refine_apply.py`: pure functions to apply plan or nodes to doctree and reindex.
+  - `llm_providers.py`: provider interfaces (Qwen/GPT/Mock) for future integration; no network code included.
+  - `prompts.py`: strict JSON-only prompt templates for plan/jsonlist.
+- Demo notebook `tree/page_refine_demo.ipynb` to test a chosen page interactively.
+
 Added Flat DocTree builder
 - New CLI: `python -m tree.builder --in-dir DIR` or `--in-file FILE`
 - Output: `doctree.json` per PDF directory (no in-place overwrite of MinerU files)

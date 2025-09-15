@@ -4,6 +4,11 @@ import os
 import re
 from html.parser import HTMLParser
 from typing import Any, List, Optional, Tuple
+import glob
+try:
+    import fitz  # type: ignore
+except Exception:  # runtime import later
+    fitz = None  # type: ignore
 import unicodedata
 
 
@@ -178,6 +183,91 @@ def sanitize_content_list(items: List[dict]) -> List[dict]:
             pass
         out.append(obj)
     return out
+
+
+# === Page image helpers ===
+def page_images_dir(source_dir: str) -> str:
+    return os.path.join(source_dir or ".", "images")
+
+
+def find_existing_page_image(source_dir: str, page_idx: int) -> Optional[str]:
+    """
+    Look for an existing page image in <source_dir>/images using common patterns.
+    Primary pattern per user spec: page_{idx}.(png|jpg|jpeg). Also try 1-based.
+    """
+    img_dir = page_images_dir(source_dir)
+    if not os.path.isdir(img_dir):
+        return None
+    patterns = []
+    # 0-based
+    for ext in ("png", "jpg", "jpeg"):
+        patterns.append(os.path.join(img_dir, f"page_{page_idx}.{ext}"))
+    # 1-based fallback
+    one_based = page_idx + 1
+    for ext in ("png", "jpg", "jpeg"):
+        patterns.append(os.path.join(img_dir, f"page_{one_based}.{ext}"))
+    for p in patterns:
+        if os.path.exists(p):
+            return p
+    # also try subfolder patterns like images/pages/page_{n}.*
+    for n in (page_idx, page_idx + 1):
+        for ext in ("png", "jpg", "jpeg"):
+            for pat in (
+                os.path.join(img_dir, "pages", f"page_{n}.{ext}"),
+                os.path.join(img_dir, "pages", f"{n:03d}.{ext}"),
+            ):
+                if os.path.exists(pat):
+                    return pat
+    return None
+
+
+def find_pdf_in_dir(source_dir: str) -> Optional[str]:
+    pdfs = glob.glob(os.path.join(source_dir or ".", "*.pdf"))
+    return pdfs[0] if pdfs else None
+
+
+def render_pdf_page_to_image(pdf_path: str, page_idx: int, out_dir: Optional[str] = None, *, dpi: int = 150) -> Optional[str]:
+    """
+    Render one PDF page to <out_dir>/images/page_{idx}.png (0-based idx by user spec). Returns saved path or None.
+    """
+    try:
+        import fitz  # type: ignore
+    except Exception:
+        logger.info("PyMuPDF not available; cannot render page %s from %s", page_idx, pdf_path)
+        return None
+    try:
+        doc = fitz.open(pdf_path)
+        if page_idx < 0 or page_idx >= len(doc):
+            return None
+        page = doc.load_page(page_idx)
+        mat = fitz.Matrix(dpi / 72.0, dpi / 72.0)
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        out_base = out_dir or page_images_dir(os.path.dirname(pdf_path))
+        os.makedirs(out_base, exist_ok=True)
+        out_path = os.path.join(out_base, f"page_{page_idx}.png")
+        pix.save(out_path)
+        return out_path
+    except Exception as e:
+        logger.info("Failed to render PDF page %s: %s", page_idx, e)
+        return None
+
+
+def ensure_page_image(source_dir: str, page_idx: int, *, pdf_path: Optional[str] = None, dpi: int = 150) -> Optional[str]:
+    """
+    Ensure there is a page image for page_idx under <source_dir>/images named page_{idx}.ext.
+    - If exists, return its path
+    - Else render from sibling PDF (first *.pdf or provided pdf_path) and save as page_{idx}.png
+    Returns the path or None on failure.
+    """
+    # Existing
+    existing = find_existing_page_image(source_dir, page_idx)
+    if existing:
+        return existing
+    # Render
+    pdf = pdf_path or find_pdf_in_dir(source_dir)
+    if not pdf:
+        return None
+    return render_pdf_page_to_image(pdf, page_idx, out_dir=page_images_dir(source_dir), dpi=dpi)
 
 
 def _sanitize_string_list(values: List[Any]) -> List[str]:

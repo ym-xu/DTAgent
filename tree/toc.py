@@ -1,6 +1,8 @@
 import json
 import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+import os
+from .utils import ensure_page_image
 
 
 def _page_nodes(flat_root: Dict[str, Any], page_idx: int) -> List[Dict[str, Any]]:
@@ -100,14 +102,22 @@ def render_toc_detect_prompt(payload: Dict[str, Any]) -> str:
     compact = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     return (
         "You are given a page summary with text lines (no local heuristics).\n"
-        "Decide if this page is a table of contents (TOC).\n"
+        "Decide if this page contains ANY table of contents (TOC) content, even if it is only a PARTIAL fragment (e.g., a few lines at the top or bottom).\n"
+        "Rules:\n"
+        "- Set is_toc=true if ANY portion of the page appears to be TOC items (partial TOC still counts).\n"
+        "- The lines are roughly sorted top→bottom by their y positions; use this order to reason about fragments.\n"
+        "- Judge only from the provided lines. Do not invent or assume extra signals.\n"
         "Output a single JSON object only: {\"is_toc\": boolean, \"confidence\": number}.\n"
         "No commentary and no code fences.\n\n"
         + compact
     )
 
 
-def detect_toc_page(llm_call: Callable[[List[Dict[str, Any]], Optional[List[Any]]], str], payload: Dict[str, Any]) -> Tuple[bool, float]:
+def detect_toc_page(
+    llm_call: Callable[[List[Dict[str, Any]], Optional[List[Any]]], str],
+    payload: Dict[str, Any],
+    images: Optional[List[Any]] = None,
+) -> Tuple[bool, float]:
     """
     Call the provided llm_call(messages, images=None)->str with a system+user prompt to detect TOC.
     Returns (is_toc, confidence). On failure, returns (False, 0.0).
@@ -117,7 +127,7 @@ def detect_toc_page(llm_call: Callable[[List[Dict[str, Any]], Optional[List[Any]
         {"role": "user", "content": render_toc_detect_prompt(payload)},
     ]
     try:
-        raw = llm_call(messages, None)  # raw JSON string expected
+        raw = llm_call(messages, images)  # raw JSON string expected
         obj = json.loads(raw)
         return bool(obj.get("is_toc", False)), float(obj.get("confidence", 0.0))
     except Exception:
@@ -143,21 +153,46 @@ def find_toc_pages(
     indices = sorted({ch.get("page_idx") for ch in flat_root.get("children", []) if isinstance(ch.get("page_idx"), int)})
     indices = [p for p in indices if p >= start_page]
     toc_pages: List[int] = []
-    last_is_toc = False
     builder = payload_builder or (lambda root, pidx: build_toc_page_payload(root, pidx))
+
+    # Cache detections
+    cache: Dict[int, Tuple[bool, float]] = {}
+
+    def detect(p: int) -> Tuple[bool, float]:
+        if p not in cache:
+            payload = builder(flat_root, p)
+            cache[p] = detect_toc_page(llm_call, payload)
+        return cache[p]
+
+    in_run = False
+    scanned = 0
+
+    source_dir = flat_root.get("source_path")
     for i, p in enumerate(indices):
-        if i >= max_scan_pages and not last_is_toc:
+        if scanned >= max_scan_pages and not in_run:
             break
-        payload = builder(flat_root, p)
-        is_toc, _ = detect_toc_page(llm_call, payload)
-        if is_toc:
+        scanned += 1
+        # Resolve page image if available
+        imgs = None
+        if isinstance(source_dir, str) and source_dir:
+            img_path = ensure_page_image(source_dir, p)
+            if img_path:
+                imgs = [img_path]
+        cur, _ = detect(p) if imgs is None else detect(p)
+        # Note: detect() caches only text-based prompt; we directly pass images below when calling llm_call
+        if imgs is not None:
+            payload = builder(flat_root, p)
+            cur, _ = detect_toc_page(llm_call, payload, images=imgs)
+        if cur:
             toc_pages.append(p)
-            last_is_toc = True
+            in_run = True
         else:
-            # if previous was TOC and current is not → TOC block ended
-            if last_is_toc:
+            if in_run:
+                # Smart end: end on first non-TOC page once a run has started
                 break
-            last_is_toc = False
+            # if not in_run, just continue scanning
+            continue
+
     return toc_pages
 
 

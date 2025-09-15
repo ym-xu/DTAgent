@@ -63,8 +63,8 @@ def build_toc_page_payload(
     max_text_len: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
-    Minimal payload for LLM-only judgement: provide only raw text lines
-    (and optional geometry y/x). No derived features like has_dots or trailing_number.
+    Minimal payload for LLM-only judgement: provide only raw text lines.
+    No geometry (x/y) and no derived features like has_dots or trailing_number.
     """
     doc_id = flat_root.get("doc_id") or "document"
     nodes = _page_nodes(flat_root, page_idx)
@@ -75,9 +75,6 @@ def build_toc_page_payload(
         raw = (n.get("text", "") or "").strip()
         if not raw:
             continue
-        outline = n.get("outline") if include_geometry else None
-        y = outline[1] if isinstance(outline, (list, tuple)) and len(outline) >= 2 else None
-        x = outline[0] if isinstance(outline, (list, tuple)) and len(outline) >= 1 else None
         # Optionally split very long concatenated blobs into candidate lines
         texts: List[str]
         if split_concatenated and len(raw) >= long_text_threshold:
@@ -88,9 +85,8 @@ def build_toc_page_payload(
         for t in texts:
             t_norm = _norm_text(t, max_text_len)
             if t_norm:
-                lines.append({"text": t_norm, "y": y, "x": x})
+                lines.append({"text": t_norm})
 
-    lines.sort(key=lambda d: (d["y"] if isinstance(d.get("y"), (int, float)) else 1e9))
     return {"meta": {"doc_id": doc_id, "page_idx": page_idx}, "lines": lines}
 
 
@@ -105,7 +101,6 @@ def render_toc_detect_prompt(payload: Dict[str, Any]) -> str:
         "Decide if this page contains ANY table of contents (TOC) content, even if it is only a PARTIAL fragment (e.g., a few lines at the top or bottom).\n"
         "Rules:\n"
         "- Set is_toc=true if ANY portion of the page appears to be TOC items (partial TOC still counts).\n"
-        "- The lines are roughly sorted top→bottom by their y positions; use this order to reason about fragments.\n"
         "- Judge only from the provided lines. Do not invent or assume extra signals.\n"
         "Output a single JSON object only: {\"is_toc\": boolean, \"confidence\": number}.\n"
         "No commentary and no code fences.\n\n"
@@ -196,59 +191,219 @@ def find_toc_pages(
     return toc_pages
 
 
-def render_toc_parse_prompt(pages_payload: List[Dict[str, Any]]) -> str:
+# === Consolidation: collapse scattered TOC nodes into a single toc node ===
+
+def _build_segmentation_payload(
+    flat_root: Dict[str, Any],
+    page_idx: int,
+    *,
+    include_geometry: bool = True,
+    split_concatenated: bool = True,
+    long_text_threshold: int = 300,
+    max_text_len: Optional[int] = None,
+) -> Dict[str, Any]:
     """
-    Render a strict JSON-only prompt to parse multiple TOC pages into a hierarchical tree.
-    Expected output JSON:
-      {
-        "headings": [
-          {"title": str, "level": int>=1, "page": int?, "children": [...]},
-          ...
-        ]
-      }
+    Build a payload for line-level selection on a single page. Each line is a candidate
+    TOC line with an index 'i' and maps back to a source node via node_idx/node_id.
+    """
+    # Reuse build_toc_page_payload to get normalized lines
+    base = build_toc_page_payload(
+        flat_root,
+        page_idx,
+        include_geometry=include_geometry,
+        split_concatenated=split_concatenated,
+        long_text_threshold=long_text_threshold,
+        max_text_len=max_text_len,
+    )
+    # Map page nodes by (y sorted) to retrieve node ids; we align by proximity in order.
+    # For robustness, we attach the nearest node (in original order) that has same page_idx.
+    page_nodes = [
+        ch for ch in flat_root.get("children", []) if ch.get("page_idx") == page_idx and ch.get("type") == "text"
+    ]
+    # Build a simple sequence mapping: lines are in reading order; map to nodes in sequence
+    # Note: when a single node was split into multiple lines, we will assign the same node repeatedly.
+    lines = base.get("lines", [])
+    out_lines: List[Dict[str, Any]] = []
+    ni = 0
+    for i, ln in enumerate(lines):
+        # Advance ni while current node has empty/invalid text
+        while ni < len(page_nodes) and not isinstance(page_nodes[ni].get("text"), str):
+            ni += 1
+        node = page_nodes[ni] if ni < len(page_nodes) else None
+        if node is not None:
+            node_id = node.get("node_id")
+            node_idx = node.get("node_idx")
+        else:
+            node_id = None
+            node_idx = None
+        out_lines.append(
+            {
+                "i": i,
+                "text": ln.get("text"),
+                "node_id": node_id,
+                "node_idx": node_idx,
+            }
+        )
+        # Heuristic: if this line is long, assume it came from the same node; else advance
+        # In practice, even advancing each time is acceptable; keep simple: advance on every line
+        if ni < len(page_nodes):
+            ni = min(ni + 1, len(page_nodes))
+
+    return {"meta": base.get("meta", {}), "lines": out_lines}
+
+
+def _reindex_flat(doc_id: str, children: List[Dict[str, Any]], source_path: Optional[str]) -> Dict[str, Any]:
+    # Reassign node_idx/node_id and rebuild indices
+    for i, ch in enumerate(children):
+        ch["node_idx"] = i
+        ch["node_id"] = f"{doc_id}#{i}"
+    root: Dict[str, Any] = {"type": "document", "doc_id": doc_id, "children": children}
+    if source_path:
+        root["source_path"] = source_path
+    by_page: Dict[int, List[int]] = {}
+    by_type: Dict[str, List[int]] = {}
+    id_to_idx: Dict[str, int] = {}
+    for i, ch in enumerate(children):
+        p = ch.get("page_idx")
+        if isinstance(p, int):
+            by_page.setdefault(p, []).append(i)
+        t = ch.get("type")
+        if isinstance(t, str):
+            by_type.setdefault(t, []).append(i)
+        id_to_idx[f"{doc_id}#{i}"] = i
+    root["indices"] = {"by_page": by_page, "by_type": by_type, "id_to_idx": id_to_idx}
+    return root
+
+# === Integrated parse+span: ask LLM to return headings plus (start_idx, end_idx) directly ===
+
+def build_toc_pages_payload_with_nodes(
+    flat_root: Dict[str, Any],
+    pages: Sequence[int],
+    *,
+    include_geometry: bool = True,
+    split_concatenated: bool = True,
+    long_text_threshold: int = 300,
+    max_text_len: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Build a compact multi-page payload for LLM to both parse headings and choose a global
+    span to replace. Each page contains lines with mapping back to source nodes (node_idx/node_id).
+    """
+    doc_id = flat_root.get("doc_id") or "document"
+    out_pages: List[Dict[str, Any]] = []
+    for p in sorted(set(pages)):
+        seg = _build_segmentation_payload(
+            flat_root,
+            p,
+            include_geometry=include_geometry,
+            split_concatenated=split_concatenated,
+            long_text_threshold=long_text_threshold,
+            max_text_len=max_text_len,
+        )
+        out_pages.append({"page_idx": p, "lines": seg.get("lines", [])})
+    return {"meta": {"doc_id": doc_id}, "pages": out_pages}
+
+
+def render_toc_parse_with_span_prompt(pages_payload: Dict[str, Any]) -> str:
+    """
+    Ask the LLM to return both a hierarchical TOC tree and a global span to replace.
+    Required JSON keys in the output:
+      - headings: [ {title: string, level: int>=1, page?: int, children: [...]}, ... ]
+      - start_idx: integer (global node_idx inclusive start)
+      - end_idx: integer (global node_idx inclusive end)
+      - pages: [int,...] (the page indices that truly contain TOC)
     """
     compact = json.dumps(pages_payload, ensure_ascii=False, separators=(",", ":"))
     return (
-        "You are given several pages of a document's table of contents (TOC).\n"
-        "Parse them into a hierarchical JSON tree with heading levels.\n"
-        "Output JSON with a single key 'headings': a list of heading objects.\n"
-        "Each heading object: {title: string, level: integer >= 1, page: integer? (original page number if present), children: [heading...]}.\n"
-        "Do not include any extra keys. Only return JSON, no code fences.\n\n"
+        "You are given candidate pages, each with lines (text) mapped to source nodes (node_idx/node_id).\n"
+        "Task: (1) Parse a hierarchical Table of Contents (TOC) tree; (2) Choose a single contiguous span\n"
+        "of nodes to replace with a toc node.\n"
+        "Output a single JSON object only with keys: headings, start_idx, end_idx, pages.\n"
+        "- headings: list of TOC headings, each {title: string, level: integer >= 1, page?: integer, children: [...]}.\n"
+        "- start_idx/end_idx: integers specifying the inclusive range of node_idx to replace.\n"
+        "- pages: list of page indices that truly contain TOC content.\n"
+        "No commentary and no code fences.\n\n"
         + compact
     )
 
 
-def build_toc_tree_with_llm(
+def build_toc_tree_and_span_with_llm(
     flat_root: Dict[str, Any],
-    toc_pages: Sequence[int],
+    candidate_pages: Sequence[int],
     llm_call: Callable[[List[Dict[str, Any]], Optional[List[Any]]], str],
-) -> Dict[str, Any]:
+    *,
+    include_geometry: bool = True,
+    split_concatenated: bool = True,
+    long_text_threshold: int = 300,
+    max_text_len: Optional[int] = None,
+) -> Tuple[List[Dict[str, Any]], int, int, List[int]]:
     """
-    Build a TOC tree using multiple detected TOC pages.
-    Returns {type: "toc", doc_id, pages: [..indices..], headings: [...]}
+    One-shot LLM call to produce both headings and a global span [start_idx..end_idx].
+    Returns (headings, start_idx, end_idx, pages). On failure, returns ([], -1, -1, []).
     """
-    # Use LLM-only payload for parsing as well
-    payloads = [build_toc_page_payload(flat_root, p) for p in toc_pages]
+    payload = build_toc_pages_payload_with_nodes(
+        flat_root,
+        candidate_pages,
+        include_geometry=include_geometry,
+        split_concatenated=split_concatenated,
+        long_text_threshold=long_text_threshold,
+        max_text_len=max_text_len,
+    )
     messages = [
         {"role": "system", "content": "You only output JSON."},
-        {"role": "user", "content": render_toc_parse_prompt(payloads)},
+        {"role": "user", "content": render_toc_parse_with_span_prompt(payload)},
     ]
-    headings: List[Dict[str, Any]] = []
     try:
         raw = llm_call(messages, None)
         obj = json.loads(raw)
-        hs = obj.get("headings")
-        if isinstance(hs, list):
-            headings = hs
+        headings = obj.get("headings") if isinstance(obj.get("headings"), list) else []
+        start_idx = int(obj.get("start_idx")) if isinstance(obj.get("start_idx"), int) else -1
+        end_idx = int(obj.get("end_idx")) if isinstance(obj.get("end_idx"), int) else -1
+        pages = obj.get("pages") if isinstance(obj.get("pages"), list) else []
+        # Basic sanity
+        if start_idx >= 0 and end_idx >= start_idx and headings is not None:
+            return headings, start_idx, end_idx, pages
     except Exception:
-        headings = []
+        pass
+    return [], -1, -1, []
 
-    toc_root: Dict[str, Any] = {
+
+def consolidate_toc_v2(
+    flat_root: Dict[str, Any],
+    candidate_pages: Sequence[int],
+    llm_call: Callable[[List[Dict[str, Any]], Optional[List[Any]]], str],
+    *,
+    include_geometry: bool = True,
+    split_concatenated: bool = True,
+    long_text_threshold: int = 300,
+    max_text_len: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Integrated consolidation: ask LLM to output headings AND [start_idx..end_idx] in one shot.
+    Useful when per-page line selection is brittle.
+    """
+    if not candidate_pages:
+        return flat_root
+    doc_id = flat_root.get("doc_id") or "document"
+    children: List[Dict[str, Any]] = list(flat_root.get("children", []))
+    headings, start_idx, end_idx, pages = build_toc_tree_and_span_with_llm(
+        flat_root,
+        candidate_pages,
+        llm_call,
+        include_geometry=include_geometry,
+        split_concatenated=split_concatenated,
+        long_text_threshold=long_text_threshold,
+        max_text_len=max_text_len,
+    )
+    if start_idx < 0 or end_idx < start_idx:
+        # Fallback: do nothing
+        return flat_root
+    toc_node: Dict[str, Any] = {
         "type": "toc",
-        "doc_id": flat_root.get("doc_id") or "document",
-        "pages": list(toc_pages),
+        "pages": pages if pages else list(sorted(set(candidate_pages))),
         "headings": headings,
+        "page_idx": children[start_idx].get("page_idx"),
+        "node_level": -1,
     }
-    if flat_root.get("source_path"):
-        toc_root["source_path"] = flat_root["source_path"]
-    return toc_root
+    new_children = children[:start_idx] + [toc_node] + children[end_idx + 1 :]
+    return _reindex_flat(doc_id, new_children, flat_root.get("source_path"))

@@ -29,8 +29,10 @@ from .toc import (
     render_toc_detect_prompt,
     detect_toc_page,
     find_toc_pages,
-    render_toc_parse_prompt,
-    build_toc_tree_with_llm,
+    build_toc_pages_payload_with_nodes,
+    render_toc_parse_with_span_prompt,
+    build_toc_tree_and_span_with_llm,
+    consolidate_toc_v2,
 )
 from .llm_clients import (
     gpt_llm_call,
@@ -51,8 +53,10 @@ __all__ = [
     "render_toc_detect_prompt",
     "detect_toc_page",
     "find_toc_pages",
-    "render_toc_parse_prompt",
-    "build_toc_tree_with_llm",
+    "build_toc_pages_payload_with_nodes",
+    "render_toc_parse_with_span_prompt",
+    "build_toc_tree_and_span_with_llm",
+    "consolidate_toc_v2",
     "gpt_llm_call",
     "qwen_llm_call",
 ]

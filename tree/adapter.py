@@ -3,7 +3,7 @@ import json
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .utils import load_json, dump_json, html_table_to_markdown
+from .utils import load_json, dump_json, html_table_to_markdown, sanitize_item_fields
 
 
 DEFAULT_SUFFIX = ".adapted.json"
@@ -145,6 +145,12 @@ def adapt_content_list(
                             it.setdefault("table_text", md)
                     except Exception:
                         pass
+
+        # Sanitize textual fields to remove zero-width/control chars and noisy runs
+        try:
+            sanitize_item_fields(it)
+        except Exception:
+            pass
 
         adapted.append(it)
 

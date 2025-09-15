@@ -14,6 +14,9 @@ What It Does
 - Provides optional hooks for OCR and LLM description (not enabled by default).
 - Ensures `image` items always contain `text` and `description` fields (empty if OCR/LLM not used).
 - Extracts `table_text` from `table_body` HTML as Markdown when possible; falls back to plain text.
+- Sanitizes text fields to remove zero-width/control characters, normalize whitespace, and drop long runs of single-letter noise.
+- Ensures caption/footnote lists exist for images/tables (`image_caption`, `image_footnote`, `table_caption`, `table_footnote`).
+  Entries are sanitized and deduplicated; empty/garbled items are removed.
 
 Input Example (MinerU content_list)
 ```
@@ -170,33 +173,17 @@ Page Refinement APIs (LLM-assisted, no CLI)
 
   root = json.load(open('/path/to/doctree.json','r',encoding='utf-8'))
   page_idx = 11
-  payload = build_page_payload(root, page_idx, page_image_ref=None)
-  prompt = render_plan_prompt(payload, level_max=4)
+  # Option A: no image (simple)
+  payload = build_page_payload(root, page_idx)
 
-  # Call your model with the prompt; suppose `raw` is the JSON string response
-  ok, plan, errs = validate_and_normalize_plan(
-      json.loads(raw),
-      allowed_ids=[e['node_id'] for e in payload['elements']],
-      types_by_id={e['node_id']: e['type'] for e in payload['elements']},
-      page_idx=page_idx,
-      level_max=4,
-  )
-  assert ok, errs
-  new_root = apply_plan_to_document(root, page_idx, plan)
-  ```
-- Example (jsonlist path):
-  ```python
-  from tree import validate_and_normalize_jsonlist, apply_nodes_to_document
-  ok, items, errs = validate_and_normalize_jsonlist(
-      json.loads(raw),
-      allowed_ids=[e['node_id'] for e in payload['elements']],
-      level_max=4,
-  )
-  assert ok, errs
-  # Derive page nodes yourself or let the model output standard nodes, then:
-  new_root = apply_nodes_to_document(root, page_idx, page_nodes)
-  ```
-- See demo notebook: `tree/page_refine_demo.ipynb`.
+  # Option B: try to find an existing page image near source_path (common names like page_0.png, page_1.png)
+  # We search under <source_path>/images first
+  payload = build_page_payload(root, page_idx, page_image_mode="find")
+
+  # Build Page/Chapter Trees
+  from tree import build_page_tree, build_chapter_tree
+  page_tree = build_page_tree(flat)
+  chapter_tree = build_chapter_tree(flat, max_level=6)
 
 Layout → outline extraction
 - Searches `layout.json` (or `layout['pdf_info']` when present) recursively for entries with `image_path` and sibling `bbox`.

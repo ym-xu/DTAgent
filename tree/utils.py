@@ -4,6 +4,7 @@ import os
 import re
 from html.parser import HTMLParser
 from typing import Any, List, Optional, Tuple
+import unicodedata
 
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,152 @@ def describe_image_with_llm(image_path: str, prompt: Optional[str] = None, **kwa
     """
     logger.info("LLM description not implemented for %s", image_path)
     return None
+
+
+# === Text sanitization utilities ===
+_RE_ZERO_WIDTH = re.compile(r"[\u200B-\u200D\uFEFF]")
+_RE_CTRL = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]")
+
+
+def sanitize_text(text: Optional[str]) -> Optional[str]:
+    """
+    Best-effort text cleanup for noisy OCR/MinerU artifacts.
+    - Unicode NFKC normalization
+    - Remove zero-width chars and BOM
+    - Remove control chars (keep \n and \t)
+    - Normalize whitespace (collapse runs; keep newlines; cap empty lines)
+    - Drop long runs of single-letter tokens (>=4 in a row) within a line
+    Returns cleaned text or original None.
+    """
+    if text is None:
+        return None
+
+    s = unicodedata.normalize("NFKC", text)
+    s = s.replace("\r", "\n")
+    s = _RE_ZERO_WIDTH.sub("", s)
+    # Remove control characters except \n and \t
+    s = _RE_CTRL.sub("", s)
+
+    # Process line by line to preserve newlines
+    lines = s.split("\n")
+    cleaned_lines: List[str] = []
+    for line in lines:
+        # Collapse spaces/tabs within the line
+        line = re.sub(r"[ \t\f\v]+", " ", line).strip()
+
+        # Remove runs of single-letter tokens (Latin) of length >= 4
+        tokens = line.split()
+        new_tokens: List[str] = []
+        i = 0
+        while i < len(tokens):
+            # Rule A: run of single-letter alphabetic tokens
+            j = i
+            while j < len(tokens) and len(tokens[j]) == 1 and tokens[j].isalpha():
+                j += 1
+            if j - i >= 4:
+                i = j
+                continue
+
+            # Rule B: run of identical token (digits or punctuation-like), length >= 5
+            tok = tokens[i]
+            k = i
+            while k < len(tokens) and tokens[k] == tok:
+                k += 1
+            is_punct_like = not re.search(r"[A-Za-z0-9]", tok or "")
+            if k - i >= 5 and (tok.isdigit() or is_punct_like or (len(tok) == 1 and not tok.isalpha())):
+                i = k
+                continue
+
+            # Keep current token
+            new_tokens.append(tok)
+            i += 1
+
+        line = " ".join(new_tokens).strip()
+        cleaned_lines.append(line)
+
+    # Collapse multiple empty lines → at most 2
+    out: List[str] = []
+    empty_count = 0
+    for ln in cleaned_lines:
+        if ln:
+            out.append(ln)
+            empty_count = 0
+        else:
+            if empty_count < 2:
+                out.append("")
+            empty_count += 1
+
+    cleaned = "\n".join(out).strip()
+    return cleaned
+
+
+def sanitize_item_fields(item: dict) -> None:
+    """In-place sanitize textual fields based on node type."""
+    typ = item.get("type")
+    if typ == "text" or typ == "equation":
+        if isinstance(item.get("text"), str):
+            item["text"] = sanitize_text(item.get("text")) or ""
+    elif typ == "image":
+        if isinstance(item.get("text"), str):
+            item["text"] = sanitize_text(item.get("text")) or ""
+        if isinstance(item.get("description"), str):
+            item["description"] = sanitize_text(item.get("description")) or ""
+        # Ensure caption/footnote lists exist and sanitize entries
+        cap = item.get("image_caption")
+        if not isinstance(cap, list):
+            item["image_caption"] = []
+        else:
+            item["image_caption"] = _sanitize_string_list(cap)
+        fn = item.get("image_footnote")
+        if not isinstance(fn, list):
+            item["image_footnote"] = []
+        else:
+            item["image_footnote"] = _sanitize_string_list(fn)
+    else:
+        # For other types we keep as-is; do not touch table_body HTML etc.
+        # But for table, normalize caption/footnote lists if present
+        if typ == "table":
+            cap = item.get("table_caption")
+            if not isinstance(cap, list):
+                item["table_caption"] = []
+            else:
+                item["table_caption"] = _sanitize_string_list(cap)
+            fn = item.get("table_footnote")
+            if not isinstance(fn, list):
+                item["table_footnote"] = []
+            else:
+                item["table_footnote"] = _sanitize_string_list(fn)
+
+
+def sanitize_content_list(items: List[dict]) -> List[dict]:
+    out: List[dict] = []
+    for it in items:
+        obj = dict(it)
+        try:
+            sanitize_item_fields(obj)
+        except Exception:
+            # Failsafe: keep original if any error occurs
+            pass
+        out.append(obj)
+    return out
+
+
+def _sanitize_string_list(values: List[Any]) -> List[str]:
+    """Sanitize a list of strings: clean text, drop empties, deduplicate preserving order."""
+    seen = set()
+    out: List[str] = []
+    for v in values:
+        if not isinstance(v, str):
+            continue
+        s = sanitize_text(v) or ""
+        # drop extremely short leftovers like single letters
+        if len(s) < 2:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
 
 
 class _SimpleTableParser(HTMLParser):

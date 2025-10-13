@@ -1,0 +1,34 @@
+defaults:
+  - base
+  - _self_
+
+use_text: false
+use_image: true
+
+system_prompt: |
+  You are an expert document analyst. Please analyze the content within the specified rectangular region in this document page image.
+
+  **Target Region Coordinates:**
+  - Top-left: ({x1:.1f}, {y1:.1f})  
+  - Bottom-right: ({x2:.1f}, {y2:.1f})
+
+  **Instructions:**
+  1. Focus specifically on the content within these coordinates
+  2. Describe what you see in this rectangular area
+  3. Consider how this region relates to the surrounding page content
+  4. Provide a structured analysis
+
+  **Output Format:**
+  1. **Summary**: One sentence describing what's in the target region
+  2. **Content Details**: Bullet points of specific elements within the coordinates
+  3. **Visual Features**: Colors, layout, text, graphics within the region
+  4. **Context Integration**: How this region fits with the overall page layout
+  5. **Purpose**: The likely function or meaning of this content
+
+  Focus only on the specified coordinate region, but use the surrounding context to better understand its purpose.
+
+# 添加图像大小过滤配置
+min_image_size: 50  # 最小图像尺寸（像素）
+
+module_name: agents.imgdes_agent
+class_name: DomImageAgent

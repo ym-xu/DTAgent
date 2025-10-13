@@ -1,5 +1,0 @@
-model_id: base
-module_name: base
-class_name: empty
-max_new_tokens: 256
-temperature: 0

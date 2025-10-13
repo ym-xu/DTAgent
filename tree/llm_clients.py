@@ -2,7 +2,8 @@ import base64
 import json
 import os
 from typing import Any, Dict, List, Optional
-
+from dotenv import load_dotenv
+load_dotenv() 
 
 def _to_data_url(path: str) -> Optional[str]:
     try:

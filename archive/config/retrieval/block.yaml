@@ -1,0 +1,11 @@
+defaults:
+  - base
+  - _self_
+
+model_type: block
+model_name: BlockRetrieval
+
+# Block 检索特有配置
+block_question_key: question
+r_block_key: block-top-${retrieval.top_k}-${retrieval.block_question_key}
+r_block_index_key: block-index-path-${retrieval.block_question_key}

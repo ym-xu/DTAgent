@@ -2,7 +2,7 @@ import json
 import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 import os
-from .utils import ensure_page_image
+from .utils_2 import ensure_page_image
 
 
 def _page_nodes(flat_root: Dict[str, Any], page_idx: int) -> List[Dict[str, Any]]:
@@ -90,41 +90,71 @@ def build_toc_page_payload(
     return {"meta": {"doc_id": doc_id, "page_idx": page_idx}, "lines": lines}
 
 
-def render_toc_detect_prompt(payload: Dict[str, Any]) -> str:
+def render_toc_detect_prompt(payload: Dict[str, Any], *, images_only: bool = False) -> str:
     """
     Render a strict JSON-only prompt asking the model to answer if this page is a TOC.
     Expected output JSON: {"is_toc": true|false, "confidence": 0..1}
     """
     compact = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    return (
-        "You are given a page summary with text lines (no local heuristics).\n"
-        "Decide if this page contains ANY table of contents (TOC) content, even if it is only a PARTIAL fragment (e.g., a few lines at the top or bottom).\n"
-        "Rules:\n"
-        "- Set is_toc=true if ANY portion of the page appears to be TOC items (partial TOC still counts).\n"
-        "- Judge only from the provided lines. Do not invent or assume extra signals.\n"
-        "Output a single JSON object only: {\"is_toc\": boolean, \"confidence\": number}.\n"
-        "No commentary and no code fences.\n\n"
-        + compact
-    )
+    if images_only:
+        return (
+            "You are given one or more full-page images (printed pages).\n"
+            "Decide whether the page contains a Table of Contents (TOC) section based ONLY on the images. Ignore any provided text lines.\n"
+            "Rules:\n"
+            "- Set is_toc=true only if there is clear TOC evidence, such as:\n"
+            "  - multiple entries like 'title … page-number',\n"
+            "  - consistent leader dots leading to right-aligned page numbers,\n"
+            "  - clearly aligned TOC columns, or printed page numbers in headers/footers matching entries.\n"
+            "- A few ordinary section headings or numbered list items without page-number/leader evidence should NOT be treated as TOC.\n"
+            "- Partial TOC counts only if at least two distinct TOC-like entries are visible.\n"
+            "- Judge only from the images. Do not invent or assume extra signals.\n"
+            "Output a single JSON object only: {\"is_toc\": boolean, \"confidence\": number}.\n"
+            "No commentary and no code fences.\n\n"
+            + compact
+        )
+    else:
+        return (
+            "You are given a page summary consisting of text lines. If page images are attached, they show the full printed page.\n"
+            "Decide whether this page contains a Table of Contents (TOC) section.\n"
+            "Rules:\n"
+            "- Set is_toc=true only if there is clear TOC evidence, such as:\n"
+            "  - multiple entries like 'title … page-number',\n"
+            "  - consistent leader dots leading to right-aligned page numbers,\n"
+            "  - clearly aligned columns typical of TOC, or printed page numbers in headers/footers matching entries.\n"
+            "- A few ordinary section headings or numbered list items without page-number/leader evidence should NOT be treated as TOC.\n"
+            "- Partial TOC counts only if at least two distinct TOC-like entries are visible.\n"
+            "- Judge only from the provided lines and (if present) the images. Do not invent or assume extra signals.\n"
+            "Output a single JSON object only: {\"is_toc\": boolean, \"confidence\": number}.\n"
+            "No commentary and no code fences.\n\n"
+            + compact
+        )
 
 
 def detect_toc_page(
     llm_call: Callable[[List[Dict[str, Any]], Optional[List[Any]]], str],
     payload: Dict[str, Any],
     images: Optional[List[Any]] = None,
+    *,
+    min_confidence: Optional[float] = None,
+    images_only: bool = False,
 ) -> Tuple[bool, float]:
     """
-    Call the provided llm_call(messages, images=None)->str with a system+user prompt to detect TOC.
-    Returns (is_toc, confidence). On failure, returns (False, 0.0).
+    Call the provided llm_call(messages, images)->str with a system+user prompt to detect TOC.
+    Returns (is_toc, confidence). If min_confidence is provided, the boolean is_toc is
+    thresholded as (raw_is_toc and confidence >= min_confidence). On failure, returns (False, 0.0).
     """
     messages = [
         {"role": "system", "content": "You only output JSON."},
-        {"role": "user", "content": render_toc_detect_prompt(payload)},
+        {"role": "user", "content": render_toc_detect_prompt(payload, images_only=images_only)},
     ]
     try:
         raw = llm_call(messages, images)  # raw JSON string expected
         obj = json.loads(raw)
-        return bool(obj.get("is_toc", False)), float(obj.get("confidence", 0.0))
+        is_toc_raw = bool(obj.get("is_toc", False))
+        conf = float(obj.get("confidence", 0.0))
+        if min_confidence is not None:
+            return (is_toc_raw and conf >= float(min_confidence)), conf
+        return is_toc_raw, conf
     except Exception:
         return False, 0.0
 
@@ -136,6 +166,8 @@ def find_toc_pages(
     start_page: int = 0,
     max_scan_pages: int = 20,
     payload_builder: Optional[Callable[[Dict[str, Any], int], Dict[str, Any]]] = None,
+    min_confidence: float = 0.75,
+    images_only: bool = False,
 ) -> List[int]:
     """
     Scan pages from start_page forward to find consecutive TOC pages.
@@ -156,7 +188,7 @@ def find_toc_pages(
     def detect(p: int) -> Tuple[bool, float]:
         if p not in cache:
             payload = builder(flat_root, p)
-            cache[p] = detect_toc_page(llm_call, payload)
+            cache[p] = detect_toc_page(llm_call, payload, min_confidence=min_confidence, images_only=images_only)
         return cache[p]
 
     in_run = False
@@ -173,12 +205,21 @@ def find_toc_pages(
             img_path = ensure_page_image(source_dir, p)
             if img_path:
                 imgs = [img_path]
-        cur, _ = detect(p) if imgs is None else detect(p)
-        # Note: detect() caches only text-based prompt; we directly pass images below when calling llm_call
+        cur_text = False
+        cur_img = False
+        if not images_only:
+            cur_text, _ = detect(p)
         if imgs is not None:
             payload = builder(flat_root, p)
-            cur, _ = detect_toc_page(llm_call, payload, images=imgs)
-        if cur:
+            cur_img, _ = detect_toc_page(
+                llm_call,
+                payload,
+                images=imgs,
+                min_confidence=min_confidence,
+                images_only=images_only,
+            )
+        # Final decision
+        if (images_only and cur_img) or (not images_only and (cur_text or cur_img)):
             toc_pages.append(p)
             in_run = True
         else:
@@ -252,7 +293,17 @@ def _build_segmentation_payload(
     return {"meta": base.get("meta", {}), "lines": out_lines}
 
 
-def _reindex_flat(doc_id: str, children: List[Dict[str, Any]], source_path: Optional[str]) -> Dict[str, Any]:
+def _reindex_flat(
+    doc_id: str,
+    children: List[Dict[str, Any]],
+    source_path: Optional[str],
+    preserve_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Reassign node_idx/node_id and rebuild indices while preserving existing root-level metadata.
+    - preserve_meta: optional dict of the previous root; copies over its top-level keys except
+      for structural keys that are recomputed here (children, indices, doc_id, type, source_path).
+    """
     # Reassign node_idx/node_id and rebuild indices
     for i, ch in enumerate(children):
         ch["node_idx"] = i
@@ -272,6 +323,14 @@ def _reindex_flat(doc_id: str, children: List[Dict[str, Any]], source_path: Opti
             by_type.setdefault(t, []).append(i)
         id_to_idx[f"{doc_id}#{i}"] = i
     root["indices"] = {"by_page": by_page, "by_type": by_type, "id_to_idx": id_to_idx}
+    # Preserve additional metadata from previous root if provided
+    if isinstance(preserve_meta, dict):
+        for k, v in preserve_meta.items():
+            if k in ("children", "indices", "doc_id", "type", "source_path"):
+                continue
+            # Do not overwrite values we just set unless absent
+            if k not in root:
+                root[k] = v
     return root
 
 # === Integrated parse+span: ask LLM to return headings plus (start_idx, end_idx) directly ===
@@ -318,6 +377,8 @@ def render_toc_parse_with_span_prompt(pages_payload: Dict[str, Any]) -> str:
         "You are given candidate pages, each with lines (text) mapped to source nodes (node_idx/node_id).\n"
         "Task: (1) Parse a hierarchical Table of Contents (TOC) tree; (2) Choose a single contiguous span\n"
         "of nodes to replace with a toc node.\n"
+        "If page images are provided, use them to verify printed page numbers in headers/footers and\n"
+        "fill the optional 'page' field for headings when possible. Do not infer from body text.\n"
         "Output a single JSON object only with keys: headings, start_idx, end_idx, pages.\n"
         "- headings: list of TOC headings, each {title: string, level: integer >= 1, page?: integer, children: [...]}.\n"
         "- start_idx/end_idx: integers specifying the inclusive range of node_idx to replace.\n"
@@ -336,6 +397,7 @@ def build_toc_tree_and_span_with_llm(
     split_concatenated: bool = True,
     long_text_threshold: int = 300,
     max_text_len: Optional[int] = None,
+    include_images: bool = True,
 ) -> Tuple[List[Dict[str, Any]], int, int, List[int]]:
     """
     One-shot LLM call to produce both headings and a global span [start_idx..end_idx].
@@ -353,8 +415,22 @@ def build_toc_tree_and_span_with_llm(
         {"role": "system", "content": "You only output JSON."},
         {"role": "user", "content": render_toc_parse_with_span_prompt(payload)},
     ]
+    # Optionally attach page images to assist with page number verification
+    images = None
+    if include_images:
+        try:
+            source_dir = flat_root.get("source_path")
+            if isinstance(source_dir, str) and source_dir:
+                imgs: List[str] = []
+                for p in sorted(set(candidate_pages)):
+                    img = ensure_page_image(source_dir, p)
+                    if img:
+                        imgs.append(img)
+                images = imgs if imgs else None
+        except Exception:
+            images = None
     try:
-        raw = llm_call(messages, None)
+        raw = llm_call(messages, images)
         obj = json.loads(raw)
         headings = obj.get("headings") if isinstance(obj.get("headings"), list) else []
         start_idx = int(obj.get("start_idx")) if isinstance(obj.get("start_idx"), int) else -1
@@ -377,6 +453,7 @@ def consolidate_toc_v2(
     split_concatenated: bool = True,
     long_text_threshold: int = 300,
     max_text_len: Optional[int] = None,
+    include_images: bool = True,
 ) -> Dict[str, Any]:
     """
     Integrated consolidation: ask LLM to output headings AND [start_idx..end_idx] in one shot.
@@ -394,7 +471,10 @@ def consolidate_toc_v2(
         split_concatenated=split_concatenated,
         long_text_threshold=long_text_threshold,
         max_text_len=max_text_len,
+        include_images=include_images,
     )
+    if not headings:
+        return flat_root
     if start_idx < 0 or end_idx < start_idx:
         # Fallback: do nothing
         return flat_root
@@ -406,4 +486,4 @@ def consolidate_toc_v2(
         "node_level": -1,
     }
     new_children = children[:start_idx] + [toc_node] + children[end_idx + 1 :]
-    return _reindex_flat(doc_id, new_children, flat_root.get("source_path"))
+    return _reindex_flat(doc_id, new_children, flat_root.get("source_path"), preserve_meta=flat_root)

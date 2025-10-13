@@ -6,6 +6,18 @@ Overview
 - Key additions: node_idx, node_level (rename), outline/bbox for images/tables, optional OCR/LLM hooks. Also extracts Markdown preview for tables.
   Also extracts Markdown preview for tables.
 
+Recent Additions (LLM, Slides)
+- Page images rendering: builder renders all PDF pages to `<source>/images/page_{idx}.png` with a progress bar.
+- Mode detection (doc vs slides): GPT‑4o by default. Samples page 0 plus one random page. Results on root:
+  - `mode` ∈ {"doc","slides"}
+  - `mode_confidence` ∈ [0,1]
+  - `columns`: 1 or 2 where 2 means a two‑up scan (two logical pages on one physical page).
+- Slides tree:
+  - `build_slides_tree(flat_root)`: per‑page image node as slide container with page’s elements under it.
+  - `build_tree_by_mode(flat_root, mode)`: returns slides tree when mode="slides", else page tree.
+- TOC LLM payload cleanup: when asking LLM to judge TOC pages, we no longer include x/y geometry; only text is sent.
+
+
 What It Does
 - Adds `node_idx` sequentially (0..n-1).
 - Renames `text_level` to `node_level` when present; keeps other fields intact.
@@ -138,6 +150,38 @@ Flat DocTree Builder
     - Customize output name: `--suffix ".flat.json"` → `doctree.flat.json`.
     - Prefer adapted inputs via `--adapted-suffix ".adapted.json"` (default).
   - Single file: `python -m tree.builder --in-file /dir/content_list.adapted.json --out /dir/doctree.json`
+  - Optional flags:
+    - `--consolidate-toc` Detect and consolidate TOC into a single toc node (skipped when slides)
+
+Usage Quickstart
+- Typical flow (per document directory):
+  1) Adapt MinerU outputs (optional but recommended for outlines/OCR):
+     - `python -m tree.adapter --in-dir /path/to/MinerU_MMLB`
+  2) Build flat doctree (renders page images, detects mode with GPT‑4o):
+     - `python -m tree.builder --in-dir /path/to/MinerU_MMLB --suffix ".flat.json"`
+  3) Enable TOC consolidation when needed:
+     - `python -m tree.builder --in-dir /path/to/MinerU_MMLB --suffix ".flat.json" --consolidate-toc`
+  4) Single file mode:
+     - `python -m tree.builder --in-file /dir/content_list.adapted.json --out /dir/doctree.json --consolidate-toc`
+
+- Programmatic API
+  - Build doctree with options:
+    - `from tree.builder import build_flat_doctree`
+    - `tree = build_flat_doctree(adapted_list, source_dir=doc_dir, doc_id=doc_id, consolidate_toc=True)`
+  - Slides tree view:
+    - `from tree.trees import build_slides_tree, build_tree_by_mode`
+    - `slides = build_slides_tree(tree)` or `view = build_tree_by_mode(tree, mode=tree.get("mode","doc"))`
+  - TOC helpers (already wired in builder):
+    - `from tree.toc import find_toc_pages, consolidate_toc_v2`
+    - `pages = find_toc_pages(tree, llm_call=gpt_llm_call)` then `tree = consolidate_toc_v2(tree, pages, gpt_llm_call)`
+
+- Output fields (builder):
+  - Root:
+    - `mode`: "doc" or "slides" (by GPT‑4o)
+    - `mode_confidence`: float in [0,1]
+    - `columns`: 1 or 2 (2 means a two‑up scan detected)
+    - `children`: flat nodes; with `--consolidate-toc`, TOC lines may be replaced by a single `toc` node (`headings`, `pages`)
+  - Node: original MinerU nodes with added indexing fields
 - DocTree root schema (minimal):
   - `type: "document"`
   - `doc_id`: directory name of the PDF folder
@@ -200,6 +244,12 @@ Notes
 - `page_idx` is preserved as-is from MinerU.
 - The adapter does not perform title disambiguation, TOC detection, caption pairing, or list nesting inference.
 - Unknown fields from MinerU are preserved untouched.
+ - Builder always renders all pages to images and shows a progress bar; GPT‑4o mode detection runs by default.
+ - For LLM features set `OPENAI_API_KEY` in the environment.
+
+LLM & Dependencies
+- Mode detection and logical page labeling use GPT‑4o; set `OPENAI_API_KEY` in the environment.
+- Qwen‑based paths were removed; GPT‑4o is the only LLM used here.
 
 Planned Next (Enhance Stage)
 - Heading/TOC detection, list nesting with stack, caption pairing (figure/table), equations and code blocks refinement.

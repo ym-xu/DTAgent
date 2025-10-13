@@ -9,20 +9,25 @@ Focus of the adapter step:
 - Optional interfaces for OCR and LLM description are provided in utils.py
 """
 
-from .adapter import (
-    adapt_content_list,
-    adapt_single_file,
-    enrich_content_with_layout,
-    process_directory,
+# from .adapter import (
+#     adapt_content_list,
+#     adapt_single_file,
+#     enrich_content_with_layout,
+#     process_directory,
+# )
+from .adapter_v2 import (
+    adapt_content_list_v2,
+    adapt_single_file_v2,
+    process_directory_v2,
 )
-from .builder import (
-    build_flat_doctree,
-    build_single as build_doctree_single,
-    build_directory as build_doctree_directory,
-)
-from .trees import (
-    build_page_tree,
-    build_chapter_tree,
+# from .trees import (
+#     build_page_tree,
+#     build_chapter_tree,
+#     build_slides_tree,
+#     build_tree_by_mode,
+# )
+from .headings import (
+    merge_adjacent_headings,
 )
 from .toc import (
     build_toc_page_payload,
@@ -39,16 +44,26 @@ from .llm_clients import (
     qwen_llm_call,
 )
 
+from .utils_2 import (
+    print_heading_outline
+)
+
 __all__ = [
     "adapt_content_list",
     "adapt_single_file",
     "enrich_content_with_layout",
     "process_directory",
+    "adapt_content_list_v2",
+    "adapt_single_file_v2",
+    "process_directory_v2",
     "build_flat_doctree",
     "build_doctree_single",
     "build_doctree_directory",
     "build_page_tree",
     "build_chapter_tree",
+    "build_slides_tree",
+    "build_tree_by_mode",
+    "merge_adjacent_headings",
     "build_toc_page_payload",
     "render_toc_detect_prompt",
     "detect_toc_page",
@@ -59,6 +74,7 @@ __all__ = [
     "consolidate_toc_v2",
     "gpt_llm_call",
     "qwen_llm_call",
+    "print_heading_outline",
 ]
 
 __version__ = "0.5.0"

@@ -1,0 +1,32 @@
+backend: llamaindex  # or: ragatouille
+
+embedding:
+  provider: openai
+  model: text-embedding-3-small
+  dim: 1536
+
+chunking:
+  target_chars: 1800         # ≈ 350–700 tokens (Chinese)
+  overlap_chars: 300
+  avoid_cross_page: true
+
+index:
+  faiss:
+    metric: ip               # inner product (cosine after normalization inside LI)
+  persist_dir: ./storage
+
+ragatouille:
+  model: colbert-ir/colbertv2.0
+  index_name: demo_index
+
+retrieval:
+  similarity_top_k: 12
+  auto_merge_ratio: 0.35
+  page_view:
+    enabled: true
+    k_pages: 5
+    agg: max                 # max | mean | sum
+
+evaluation:
+  page_metrics:
+    k_list: [1,3,5,10]

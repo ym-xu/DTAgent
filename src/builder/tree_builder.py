@@ -69,6 +69,13 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
             "image_path": item.get("img_path"),
             **({"bbox": bbox} if isinstance(bbox, (list, tuple, list)) else {}),
         }
+        # Preserve media links produced by enhancer (captions/subcaptions/footnotes)
+        try:
+            links = item.get("links")
+            if isinstance(links, dict):
+                node["links"] = links
+        except Exception:
+            pass
         caps = item.get("image_caption") if isinstance(item.get("image_caption"), list) else []
         if caps:
             node["children"] = [{
@@ -92,10 +99,19 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
             "node_id": nid,
             "page_idx": page_idx,
             "read_order_idx": read_order,
+            # Preserve table raster image path if provided
+            **({"image_path": item.get("img_path")} if item.get("img_path") is not None else {}),
             **({"logical_page": logical_page} if logical_page is not None else {}),
             "data": item.get("table_body") or item.get("table_text") or "",
             **({"bbox": bbox} if isinstance(bbox, (list, tuple, list)) else {}),
         }
+        # Preserve media links for tables as well
+        try:
+            links = item.get("links")
+            if isinstance(links, dict):
+                node["links"] = links
+        except Exception:
+            pass
         caps = item.get("table_caption") if isinstance(item.get("table_caption"), list) else []
         if caps:
             node.setdefault("children", []).append({

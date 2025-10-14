@@ -16,6 +16,65 @@ The pipeline consists of four major modules:
 ## 🧩 2. Core Agent Architecture
 The agent operates through an **iterative navigation–observation–reasoning loop**.
 
+### 2.0 End-to-End Overview
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                               User Question                              │
+└───────────────┬──────────────────────────────────────────────────────────┘
+                ▼
+        ┌───────────────────────┐
+        │  1) Router (LLM)      │  ← 解析意图与信号
+        │  ─ query_type         │  → RouterDecision (JSON)
+        │  ─ signals / risk ... │
+        └──────────┬────────────┘
+                   ▼
+        ┌───────────────────────┐
+        │  2) Planner (LLM)     │  ← 承接 RouterDecision
+        │  ─ StrategyPlan(JSON) │  → stages / steps / rerank / pack /
+        │    • methods          │    coverage_gate / fallbacks / final
+        └──────────┬────────────┘
+                   ▼
+        ┌────────────────────────────────────────────────────────────────┐
+        │                3) ToolHub / Executor (非 LLM)                   │
+        │                                                                │
+        │  3.1 并发检索 lanes（bm25_node.search / table_index.search / …） │
+        │          │hits[]              │hits[]              │hits[]      │
+        │          ▼                    ▼                    ▼            │
+        │  3.2 RRF + rerank(features: year/unit/toc_distance/…)           │
+        │          ▼ ranked_hits[]                                        │
+        │  3.3 structure.expand → candidates[]                            │
+        │  3.4 pack.mmr_knapsack → evidence_pack + coverage               │
+        │  3.5 coverage < gate ? ──(yes)─ apply fallbacks ─→ 回到 3.1     │
+        └──────────┬──────────────────────────────────────────────────────┘
+                   ▼
+        ┌────────────────────────────────────────────────────────────────┐
+        │                4) Steps 执行器（非 LLM）                        │
+        │   顺序执行 Planner.steps：locate / find_regions / extract /     │
+        │   vlm_count / compute.eval → 产出中间变量（N_cars、Pct、ANS…） │
+        └──────────┬─────────────────────────────────────────────────────┘
+                   ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │ 5) Reader (LLM，可选)                                   │
+   │   • 使用 evidence_pack 按约束作答                       │
+   └──────────┬──────────────────────────────────────────────┘
+              ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │ 6) Judger (LLM/规则)                                    │
+   │   • entail/unit/time/conflict/format 校验               │
+   │   • 失败 → fallback 或 REPLAN                           │
+   └──────────┬──────────────────────────────────────────────┘
+              ▼
+   ┌─────────────────────────────────────────────────────────┐
+   │ 7) Finalizer                                            │
+   │   • 输出 {answer, format, support, metrics, trace}      │
+   └─────────────────────────────────────────────────────────┘
+```
+
+**旁路组件**
+- DocGraphNavigator：提供树/图邻域（供 `structure.expand` 与 `observation_plan` 使用）
+- Memory：缓存问题、Router/Strategy 历史、命中与观察，驱动重试与去重
+- Trace Logger（规划中）：记录 plan/hits/ROI/reader/judger/tool-calls，支持复现
+
 ### 2.1 Planner (Navigation)
 - **Goal:** Select which DocTree nodes (sections/pages) to inspect next.  
 - **Inputs:**  
@@ -52,6 +111,43 @@ The agent operates through an **iterative navigation–observation–reasoning l
 - Prevents re-querying the same sections and saves reasoning trace for debugging.
 
 ---
+
+## 🚀 2.6 agents_v2 Implementation Snapshot
+
+**Design Goals**
+- 保持“规划→检索→观察→推理”主循环，但全部组件模块化，便于替换策略或后端。
+- 检索前先做策略判定，明确需要的通道（位置跳转 / 稀疏 / 稠密 / 混合）。
+- 观察阶段输出结构化证据（文本片段、表格行列、图像说明），Reasoner 统一消费。
+- 必须使用 LLM 做最终推理（缺答案时返回 `REPLAN`），便于追踪支持节点。
+
+**模块职责**
+- `src/agents_v2/schemas.py`：统一动作、策略、观测、回答等数据结构。
+- `src/agents_v2/memory.py`：缓存问题、策略、检索结果与观察证据。
+- `src/agents_v2/router.py`：LLM Router，识别问题类型与结构化信号。
+- `src/agents_v2/strategy_planner.py`：LLM 检索策略生成（过渡实现，待由 Router+StrategyCard 替换）。
+- `src/agents_v2/planner.py`：从 Router 决策自动生成检索计划（阶段/步骤/回退），并把策略转换为检索与观察动作。
+- `src/agents_v2/toolhub/`：Tool Cards 规范实现，含 ToolRegistry/Executor 与各工具适配器骨架。
+- `src/agents_v2/retriever/manager.py`：执行 `jump_to` / 稀疏 / 稠密 / 混合检索，当前使用 JSON 索引（向量、BM25 仍为轻量实现）。
+- `src/agents_v2/loaders.py`：加载 summary / dense / sparse / graph_edges，抽取表格结构、图像元信息。
+- `src/agents_v2/observer.py`：根据节点类型封装证据；支持注入 LLM 图像分析器（基于 caption 描述）。
+- `src/agents_v2/reasoner.py`：过滤证据 → 构造 LLM prompt（包含表格结构、图像描述）→ 解析回答；无启发式兜底。
+- `src/agents_v2/orchestrator.py`：协调整个循环，处理 `REPLAN`。
+- `src/agents_v2/cli.py`：单文档调试入口，可查看策略、命中、观测和最终回答。
+
+**✅ 已完成**
+- 基础模块与数据结构全部落地，并有单元测试覆盖策略、检索、观察、推理及 CLI。
+- Loader 会从 `summary.json`/`dense_coarse.jsonl`/`graph_edges.jsonl` 读取索引，拼出 `DocGraphNavigator` 与 `RetrieverResources`。
+- 表格若以结构化 list/dict 存在，可解析列名/行数据并写入 `structured_table`；Reasoner prompt 会包含这些字段。
+- CLI 支持 `--llm-backend/--llm-model/--use-image-llm`，可注入自定义 LLM/VLM callable。
+- Reasoner 强制走 LLM 流程；若 LLM 返回空结果，则请求 `REPLAN`。
+
+**⏳ 未完成 / 待补充**
+- 表格 HTML 解析：`_parse_table_node` 目前不会解析 HTML `<table>`；需引入解析器提取列/行。
+- 图像“真 VLM”支持：DocTree 尚未提供图片路径；`build_llm_image_analyzer` 只基于 caption 调用 LLM，没有传递像素数据。
+- 向量 / BM25 检索仍是轻量文本匹配，尚未对接 `.faiss` 或 BM25 文件。
+- Reasoner prompt 尚未针对不同任务做更细粒度模板（如数值验证、列名指令等）。
+- 缺少日志 / trace 导出，方便排查多轮规划。
+- 表格/图像证据仍需要更细粒度的字段（例如单元格定位、坐标信息）。
 
 ## ⚙️ 3. Data Flow Summary
 ```text
@@ -435,3 +531,39 @@ JSON/JSONL
   - sparse_leaf.jsonl：leaf 稀疏（body=raw_text）
   - graph_edges.jsonl：parent/child/same_page/prev_next/ref/has_col
   - id_maps.json：图表号映射
+
+## 🔧 Tool Cards & Execution Skeleton（进行中）
+
+- **RouterDecision (JSON)**：`query_type`、`signals`（page_hint / objects / units / years / operations / expected_format …）、`risk`、`constraints`、`confidence`
+- **StrategyPlan (JSON)**：
+  ```json
+  {
+    "stages": [{"stage": "primary", "methods": ["bm25_node.search", "..."], "k_pages": 8, "k_nodes": 50, "page_window": 1}],
+    "steps": [{"step_id": "T1", "tool": "bm25_node.search", "args": {...}, "save_as": "H1"}],
+    "rerank": {"fuse": "RRF", "features": ["year","unit","toc_distance"], "diversify_by": "section"},
+    "pack": {"mmr_lambda": 0.7, "ctx_tokens": 1500, "per_page_limit": 2, "attach": ["caption","table_header"]},
+    "coverage_gate": 0.5,
+    "fallbacks": [
+      {"condition": "coverage<0.5", "action": {"expand_window": 1}},
+      {"condition": "visual_low_conf", "action": {"enable": "vlm_verify_topk", "topk": 6}}
+    ],
+    "final": {"answer_var": "ANS", "format": "int|float|string|list"}
+  }
+  ```
+- **ToolHub 规范**：
+  - `ToolCall(tool_id, args)` → `ToolResult(status, data, metrics, error?)`
+  - 统一命中结构 `Hit`：`{eid, doc_id, page_idx, node_id, modality, snippet, bbox, score_raw, method, extra}`
+  - tool_id 命名：检索 `{name}.search`，定位 `{name}.locate/find_regions`，处理 `{name}.pack|extract|compute`，视觉 `{name}.count/screen`，阅读 `reader.answer`，核验 `judger.verify`
+  - 目录 `src/agents_v2/toolhub/`：
+    - `types.py`：ToolCall / ToolResult / Hit
+    - `registry.py`：ToolRegistry（注册/查找）
+    - `executor.py`：ToolExecutor（延迟记录 + 错误收敛）
+    - `adapters/`：12 张工具卡占位（bm25_node/page、table_index、chart_index、structure.expand、pack.mmr_knapsack、page_locator、figure_finder、chart_screener、vlm_count、extract.*、compute.eval、reader.answer、judger.verify）
+- **当前状态**：
+  - 适配器目前均返回 `NOT_IMPLEMENTED`。
+  - Orchestrator 会先调用 ToolHub（写入占位结果），随后仍回退到 `RetrieverManager` 执行原有稠密/稀疏检索，因此线上行为与旧版本一致。
+- **优先事项**：
+  1. 实现最小工具集：将 `RetrieverManager`、pack、VLM 计数等逻辑迁移至 ToolHub 适配器。
+  2. 完成 ToolHub 执行链：并发检索 → RRF → expand → pack → coverage gate → steps → Reader/Judger → Finalizer。
+  3. 新增 `structure.children`、`extract.heading_first` 等卡片，支持“首个子标题”场景。
+  4. Trace & Metrics：记录每次 tool 调用的 `tool_id`、`status`、`n_hits`、`latency_ms`、`tokens`，支撑科研复现与性能评估。

@@ -59,7 +59,7 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
         if isinstance(lvl, int) and lvl >= 1:
             # handled as section elsewhere
             return None
-        return {
+        node = {
             "type": "text",
             "node_id": _make_typed_id("t", node_idx, fallback_idx),
             "page_idx": page_idx,
@@ -68,6 +68,14 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
             "text": item.get("text", ""),
             **({"bbox": bbox} if isinstance(bbox, (list, tuple, list)) else {}),
         }
+        # Preserve media_link from enhancer (text -> media link)
+        try:
+            ml = item.get("media_link")
+            if isinstance(ml, dict):
+                node["media_link"] = ml
+        except Exception:
+            pass
+        return node
     if t == "image":
         nid = _make_typed_id("img", node_idx, fallback_idx)
         node: Dict[str, Any] = {
@@ -78,6 +86,13 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
             "image_path": item.get("img_path"),
             **({"bbox": bbox} if isinstance(bbox, (list, tuple, list)) else {}),
         }
+        # Preserve media links produced by enhancer (captions/subcaptions/footnotes)
+        try:
+            links = item.get("links")
+            if isinstance(links, dict):
+                node["links"] = links
+        except Exception:
+            pass
         caps = item.get("image_caption") if isinstance(item.get("image_caption"), list) else []
         if caps:
             node["children"] = [{
@@ -101,8 +116,17 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
             "page_idx": page_idx,
             "read_order_idx": read_order,
             "data": item.get("table_body") or item.get("table_text") or "",
+            # Preserve table raster image path if provided by adapter/enhancer
+            **({"image_path": item.get("img_path")} if item.get("img_path") is not None else {}),
             **({"bbox": bbox} if isinstance(bbox, (list, tuple, list)) else {}),
         }
+        # Preserve media links for tables as well
+        try:
+            links = item.get("links")
+            if isinstance(links, dict):
+                node["links"] = links
+        except Exception:
+            pass
         caps = item.get("table_caption") if isinstance(item.get("table_caption"), list) else []
         if caps:
             node.setdefault("children", []).append({

@@ -202,3 +202,5 @@ temp/
 mineru.py
 
 /_stats
+
+/node_modules

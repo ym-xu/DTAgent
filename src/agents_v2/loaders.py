@@ -1,0 +1,472 @@
+"""
+Index Loaders
+=============
+
+从真实 DocTree 索引文件构建检索与导航所需的数据结构。
+"""
+
+from __future__ import annotations
+
+import json
+from collections import defaultdict
+import re
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Tuple
+
+from .planner import DocGraphNavigator
+from .retriever import RetrieverResources
+from .observer import NodeEvidence
+
+
+def _read_json(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _read_jsonl(path: Path) -> Iterable[dict]:
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
+
+
+def build_resources_from_index(doc_dir: Path) -> Tuple[RetrieverResources, DocGraphNavigator]:
+    """
+    从索引目录加载 RetrieverResources 与 DocGraphNavigator。
+
+    期望目录包含：
+    - summary.json
+    - graph_edges.jsonl
+    """
+    summary_path = doc_dir / "summary.json"
+    edges_path = doc_dir / "graph_edges.jsonl"
+    if not summary_path.exists():
+        raise FileNotFoundError(summary_path)
+    if not edges_path.exists():
+        raise FileNotFoundError(edges_path)
+
+    summary = _read_json(summary_path)
+    nodes = summary.get("nodes", [])
+    doctree_map = _load_doctree_map(doc_dir)
+
+    label_index: Dict[str, str] = {}
+    page_index: Dict[int, List[str]] = defaultdict(list)
+    text_index: Dict[str, str] = {}
+
+    FIGURE_LABEL_RE = re.compile(r"\b(?:Figure|Fig\.?)\s*([A-Za-z0-9]+)", re.IGNORECASE)
+    TABLE_LABEL_RE = re.compile(r"\bTable\s*([A-Za-z0-9]+)", re.IGNORECASE)
+
+    def _register_label(key: Optional[str], node_id: str, *, prioritize: bool = False) -> None:
+        if not isinstance(key, str):
+            return
+        trimmed = key.strip()
+        if not trimmed:
+            return
+        if prioritize or trimmed not in label_index:
+            label_index[trimmed] = node_id
+        lower = trimmed.lower()
+        if prioritize or lower not in label_index:
+            label_index[lower] = node_id
+
+    def _extract_caption_aliases(node: dict, tree_node: Optional[dict]) -> List[str]:
+        texts: List[str] = []
+        for key in ("title", "summary", "dense_text"):
+            value = node.get(key)
+            if isinstance(value, str):
+                texts.append(value)
+        hints = node.get("hints")
+        if isinstance(hints, list):
+            texts.extend(str(h) for h in hints if isinstance(h, str))
+        if tree_node:
+            caption = _extract_caption(tree_node)
+            if isinstance(caption, str):
+                texts.append(caption)
+        aliases: List[str] = []
+        for text in texts:
+            for match in FIGURE_LABEL_RE.findall(text):
+                label = f"Figure {match}"
+                aliases.append(label)
+            for match in TABLE_LABEL_RE.findall(text):
+                label = f"Table {match}"
+                aliases.append(label)
+        return aliases
+
+    for node in nodes:
+        node_id = node.get("node_id")
+        if not isinstance(node_id, str):
+            continue
+        label = node.get("label")
+        if isinstance(label, str):
+            _register_label(label, node_id, prioritize=True)
+        title = node.get("title") or node.get("heading")
+        _register_label(title or None, node_id)
+        title_norm = node.get("title_norm")
+        _register_label(title_norm or None, node_id)
+        role = node.get("role")
+        if role in {"image", "table"}:
+            tree_node = doctree_map.get(node_id) if doctree_map else None
+            for alias in _extract_caption_aliases(node, tree_node):
+                _register_label(alias, node_id, prioritize=True)
+        page_idx = node.get("page_idx")
+        if isinstance(page_idx, int):
+            page_index[page_idx].append(node_id)
+        dense_text = node.get("dense_text") or node.get("summary") or node.get("title")
+        if isinstance(dense_text, str) and dense_text.strip():
+            text_index[node_id] = dense_text.strip()
+
+    dense_views, dense_base_ids = _load_dense_views(doc_dir)
+    sparse_docs = _load_sparse_docs(doc_dir)
+
+    resources = RetrieverResources(
+        label_index=label_index,
+        page_index=dict(page_index),
+        text_index=text_index,
+        dense_views=dense_views,
+        dense_base_ids=dense_base_ids,
+        sparse_docs=sparse_docs,
+    )
+
+    graph = _build_graph(edges_path)
+    return resources, graph
+
+
+def _load_dense_views(doc_dir: Path) -> Tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, str]]]:
+    path = doc_dir / "dense_coarse.jsonl"
+    dense_views: Dict[str, Dict[str, str]] = defaultdict(dict)
+    dense_base_ids: Dict[str, Dict[str, str]] = defaultdict(dict)
+    if not path.exists():
+        return {}, {}
+    for rec in _read_jsonl(path):
+        node_id = rec.get("node_id")
+        dense_text = rec.get("dense_text")
+        if not isinstance(node_id, str) or not isinstance(dense_text, str):
+            continue
+        variant = rec.get("variant") or rec.get("role") or "default"
+        variant = str(variant)
+        dense_views[variant][node_id] = dense_text
+        base_id = node_id.split("#", 1)[0]
+        dense_base_ids[variant][node_id] = base_id
+    return dict(dense_views), dict(dense_base_ids)
+
+
+def _load_sparse_docs(doc_dir: Path) -> Dict[str, Dict[str, str]]:
+    path = doc_dir / "sparse_coarse.jsonl"
+    docs: Dict[str, Dict[str, str]] = {}
+    if not path.exists():
+        return docs
+    useful_fields = ["title", "caption", "table_schema", "aliases", "body", "heading", "headings_path"]
+    for rec in _read_jsonl(path):
+        doc_id = rec.get("id")
+        if not isinstance(doc_id, str):
+            continue
+        fields: Dict[str, str] = {}
+        for key in useful_fields:
+            val = rec.get(key)
+            if isinstance(val, str) and val.strip():
+                fields[key] = val.strip()
+        docs[doc_id] = fields
+    return docs
+
+
+def _build_graph(edges_path: Path) -> DocGraphNavigator:
+    children: Dict[str, List[str]] = defaultdict(list)
+    parents: Dict[str, str] = {}
+    same_page: Dict[str, List[str]] = defaultdict(list)
+
+    for edge in _read_jsonl(edges_path):
+        src = edge.get("src")
+        dst = edge.get("dst")
+        etype = edge.get("type")
+        if not isinstance(src, str) or not isinstance(dst, str):
+            continue
+        if etype == "child":
+            children[src].append(dst)
+            parents[dst] = src
+        elif etype == "same_page":
+            same_page[src].append(dst)
+            same_page[dst].append(src)
+
+    siblings: Dict[str, List[str]] = defaultdict(list)
+    for parent, kids in children.items():
+        for kid in kids:
+            siblings[kid].extend(x for x in kids if x != kid)
+
+    return DocGraphNavigator(
+        children=dict(children),
+        parents=parents,
+        same_page=dict(same_page),
+        siblings=dict(siblings),
+    )
+
+
+def build_observer_store(doc_dir: Path) -> Dict[str, NodeEvidence]:
+    """根据 summary 和 dense_leaf 构建节点证据映射。"""
+    summary_path = doc_dir / "summary.json"
+    if not summary_path.exists():
+        raise FileNotFoundError(summary_path)
+    summary = _read_json(summary_path)
+    nodes = summary.get("nodes", [])
+
+    store: Dict[str, NodeEvidence] = {}
+    for node in nodes:
+        node_id = node.get("node_id")
+        if not isinstance(node_id, str):
+            continue
+        role = node.get("role") or "text"
+        modality = "text"
+        if role == "image":
+            modality = "image"
+        elif role == "table":
+            modality = "table"
+        content = node.get("dense_text") or node.get("summary") or node.get("title")
+        extra = {
+            "title": node.get("title"),
+            "hints": node.get("hints"),
+            "page_idx": node.get("page_idx"),
+            "label": node.get("label"),
+        }
+        store[node_id] = NodeEvidence(
+            node_id=node_id,
+            modality=modality,
+            content=content,
+            extra={k: v for k, v in extra.items() if v is not None},
+        )
+
+    doctree_map = _load_doctree_map(doc_dir)
+    if doctree_map:
+        for node_id, node in doctree_map.items():
+            if node_id not in store:
+                continue
+            role = node.get("role") or node.get("type")
+            if role == "table":
+                table_info = _parse_table_node(node)
+                if table_info:
+                    ev = store[node_id]
+                    ev.extra.setdefault("table", table_info)
+                    if table_info.get("preview"):
+                        ev.content = table_info["preview"]
+            elif role == "image":
+                image_info = _parse_image_node(node, base_dir=doc_dir)
+                if image_info:
+                    ev = store[node_id]
+                    ev.extra.setdefault("image", image_info)
+                    if image_info.get("path"):
+                        ev.extra.setdefault("image_path", image_info["path"])
+                    if image_info.get("summary"):
+                        ev.content = image_info["summary"]
+            elif role == "list":
+                list_info = _parse_list_node(node)
+                if list_info:
+                    ev = store[node_id]
+                    items = list_info.get("items") or []
+                    if items:
+                        ev.extra.setdefault("structured_list", items)
+                    ev.content = "\n".join(items) if items else list_info.get("preview") or ev.content
+
+    dense_leaf_path = doc_dir / "dense_leaf.jsonl"
+    if dense_leaf_path.exists():
+        for rec in _read_jsonl(dense_leaf_path):
+            node_id = rec.get("node_id")
+            if not isinstance(node_id, str):
+                continue
+            content = rec.get("raw_text") or rec.get("dense_text")
+            extra = {
+                "parent_section": rec.get("filters", {}).get("parent_section") if isinstance(rec.get("filters"), dict) else None,
+                "page_idx": rec.get("filters", {}).get("page_idx") if isinstance(rec.get("filters"), dict) else None,
+            }
+            store[node_id] = NodeEvidence(
+                node_id=node_id,
+                modality="text",
+                content=content,
+                extra={k: v for k, v in extra.items() if v is not None},
+            )
+    return store
+
+
+def _load_doctree_map(doc_dir: Path) -> Dict[str, dict]:
+    path = doc_dir / "doctree.mm.json"
+    if not path.exists():
+        parent = doc_dir.parent
+        candidate = parent / "doctree.mm.json"
+        if candidate.exists():
+            path = candidate
+    if not path.exists():
+        return {}
+    root = _read_json(path)
+    stack = [root]
+    id_map: Dict[str, dict] = {}
+    while stack:
+        cur = stack.pop()
+        if not isinstance(cur, dict):
+            continue
+        nid = cur.get("node_id")
+        if isinstance(nid, str):
+            id_map[nid] = cur
+        for ch in cur.get("children", []) or []:
+            if isinstance(ch, dict):
+                stack.append(ch)
+    return id_map
+
+
+def _parse_table_node(node: dict) -> Dict[str, object] | None:
+    data = node.get("data")
+    columns: List[str] = []
+    rows: List[List[str]] = []
+    if isinstance(data, list):
+        for idx, row in enumerate(data):
+            if isinstance(row, dict):
+                if not columns:
+                    columns = list(row.keys())
+                rows.append([str(row.get(col, "")) for col in columns])
+            elif isinstance(row, (list, tuple)):
+                if idx == 0 and not columns:
+                    columns = [str(col) for col in row]
+                else:
+                    rows.append([str(cell) for cell in row])
+    elif isinstance(data, str) and "<table" in data.lower():
+        parsed = _parse_html_table(data)
+        columns = parsed.get("columns", [])
+        rows = parsed.get("rows", [])
+    preview = None
+    if rows and columns:
+        preview = ", ".join(f"{col}: {rows[0][i]}" for i, col in enumerate(columns) if rows[0][i])
+    caption = _extract_caption(node)
+    return {
+        "columns": columns,
+        "rows": rows,
+        "caption": caption,
+        "preview": preview or caption or None,
+    }
+
+
+def _parse_list_node(node: dict) -> Dict[str, object] | None:
+    items_raw = node.get("items")
+    items: List[str] = []
+    if isinstance(items_raw, list):
+        for entry in items_raw:
+            if isinstance(entry, dict):
+                text = entry.get("text")
+            else:
+                text = entry
+            if isinstance(text, str):
+                cleaned = text.strip()
+                if cleaned:
+                    items.append(cleaned)
+    if not items:
+        return None
+    preview = "; ".join(items[:2]) if items else None
+    return {
+        "items": items,
+        "preview": preview,
+    }
+
+
+def _parse_image_node(node: dict, *, base_dir: Path) -> Dict[str, object] | None:
+    caption = _extract_caption(node)
+    desc = node.get("description")
+    img_path = node.get("image_path") or node.get("path")
+    resolved_path = _resolve_image_path(img_path, base_dir) if isinstance(img_path, str) else None
+    out = {
+        "caption": caption,
+        "description": desc,
+        "summary": "; ".join(filter(None, [caption, desc])) or None,
+        "path": resolved_path,
+    }
+    return out
+
+
+def _extract_caption(node: dict) -> Optional[str]:
+    for ch in node.get("children", []) or []:
+        if isinstance(ch, dict) and (ch.get("role") == "caption" or ch.get("type") == "text"):
+            text = ch.get("text")
+            if isinstance(text, str) and text.strip():
+                return text.strip()
+    text = node.get("caption")
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+    return None
+
+
+def _parse_html_table(html: str) -> Dict[str, List[List[str]]]:
+    from html.parser import HTMLParser
+
+    class TableParser(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rows: List[List[str]] = []
+            self.row_tags: List[List[str]] = []
+            self._current_row: List[str] = []
+            self._current_tags: List[str] = []
+            self._buffer: List[str] = []
+            self._in_cell = False
+            self._cell_tag = "td"
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "tr":
+                self._current_row = []
+                self._current_tags = []
+            elif tag in ("td", "th"):
+                self._in_cell = True
+                self._cell_tag = tag
+                self._buffer = []
+
+        def handle_data(self, data):
+            if self._in_cell:
+                self._buffer.append(data)
+
+        def handle_endtag(self, tag):
+            if tag in ("td", "th") and self._in_cell:
+                text = "".join(self._buffer).strip()
+                self._current_row.append(text)
+                self._current_tags.append(self._cell_tag)
+                self._in_cell = False
+                self._buffer = []
+            elif tag == "tr" and self._current_row:
+                self.rows.append(self._current_row)
+                self.row_tags.append(self._current_tags)
+                self._current_row = []
+                self._current_tags = []
+
+    parser = TableParser()
+    parser.feed(html)
+
+    columns: List[str] = []
+    data_rows: List[List[str]] = []
+    for row, tags in zip(parser.rows, parser.row_tags):
+        if not row:
+            continue
+        if not columns:
+            if any(t == "th" for t in tags) or "<th" in html.lower():
+                columns = row
+                continue
+            columns = row
+            continue
+        # pad or trim to match columns length
+        if len(row) < len(columns):
+            row = row + [""] * (len(columns) - len(row))
+        elif len(row) > len(columns):
+            row = row[: len(columns)]
+        data_rows.append(row)
+
+    return {"columns": columns, "rows": data_rows}
+
+
+def _resolve_image_path(image_path: Optional[str], base_dir: Path) -> Optional[str]:
+    if not image_path:
+        return None
+    candidate = Path(image_path)
+    if candidate.is_absolute() and candidate.exists():
+        return str(candidate)
+    search_roots = [base_dir]
+    parents = list(base_dir.parents)[:3]
+    search_roots.extend(parents)
+    for root in search_roots:
+        resolved = (root / image_path).resolve()
+        if resolved.exists():
+            return str(resolved)
+    return None
+
+
+__all__ = ["build_resources_from_index", "build_observer_store"]

@@ -8,6 +8,7 @@ ToolHub package
 from .types import ToolCall, ToolResult, ToolStatus, Hit  # noqa: F401
 from .registry import ToolRegistry  # noqa: F401
 from .executor import ToolExecutor  # noqa: F401
+from .defaults import build_default_registry  # noqa: F401
 
 __all__ = [
     "ToolCall",
@@ -16,4 +17,5 @@ __all__ = [
     "Hit",
     "ToolRegistry",
     "ToolExecutor",
+    "build_default_registry",
 ]

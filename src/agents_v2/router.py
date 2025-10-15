@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field, replace
-from typing import Dict, Optional, Protocol
+from typing import Dict, List, Optional, Protocol, Tuple
 
 from .schemas import (
     RouterConstraints,
@@ -83,7 +83,7 @@ Allowed query_type values (pick exactly one, do NOT invent new types):
 - hybrid : fallback when both dense & sparse textual cues are crucial.
 - map_spatial : questions about map regions or spatial color coding.
 
-Return ONLY JSON following this schema exactly:
+Return ONLY JSON following this schema exactly (include up to 3 candidate query types ranked by confidence):
 {
   "query": string,                     # original question text (trimmed)
   "query_type": "...",                 # one of the predefined task types
@@ -94,12 +94,18 @@ Return ONLY JSON following this schema exactly:
     "objects": [string, ...],          # visual targets
     "units": [string, ...],
     "years": [int, ...],
-    "operations": [string, ...],       # sum/diff/max/min/avg/compare/count etc.
+    "operations": [string, ...],       # filter/lookup/sum/diff/max/min/avg/count etc.
+    "threshold": number|null,          # numeric cutoff when using filter comparisons
+    "comparator": string|null,         # >, >=, <, <=, ==, !=
     "expected_format": "int|float|string|list",
     "section_cues": [string, ...],
     "keywords": [string, ...],
     "objects_scope": "figure|page|all_figures_on_page"
   },
+  "candidates": [
+    {"query_type": "table", "score": 0.8},
+    {"query_type": "visual_presence", "score": 0.2}
+  ],
   "risk": {
     "ambiguity": 0.0-1.0,
     "need_visual": boolean,
@@ -121,12 +127,14 @@ Rules:
 - expected_format should align with how the final answer should be delivered.
 - Do NOT add extra fields or text outside JSON.
 - Unless the user explicitly guarantees the answer exists, set constraints.allow_unanswerable to true.
+- Provide a "candidates" array listing up to three likely query types with confidence scores (float in [0,1]).
 - Disambiguation rubric (VERY IMPORTANT):
-  * If the question asks for a percentage/value already reported in a table/figure/caption, set query_type=\"table\" or \"chart\" (not \"numeric_compute\").
+  * If the question asks for a percentage/value with explicit units or years (e.g., %, percent, rate, \"from 2003 to 2007\"), prioritize query_type=\"table\". If the value is explicitly tied to a figure caption, use query_type=\"chart\".
   * Use \"numeric_compute\" only when the answer requires arithmetic on multiple retrieved values (e.g., sum/diff/avg across different cells or pages).
   * If the question requests counting objects in images/figures or mentions pages with figures/photos/icons, set query_type=\"visual_count\" (also set risk.need_visual=true).
   * If risk.need_visual=true and signals.objects is non-empty, prefer a visual_* query type over textual ones.
   * signals.objects_scope is ONLY for visual tasks; keep it null otherwise.
+  * If the question specifies inequalities (\"more than\", \"at least\", etc.), include \"filter\" in operations, set comparator to the mathematical symbol (\">\", \">=\", \"<\", \"<=\", \"==\", \"!=\"), and threshold to the numeric value. Add \"lookup\" alongside \"filter\" when the task is to identify which entity satisfies the condition.
 - Few-shot expectations:
   * Question: \"From 2003 to 2007, what share (%) of the Bronx’s total land area was rezoned?\" → query_type=\"table\", units=[\"%\"], years=[2003,2004,2005,2006,2007], risk.need_table=true, risk.need_chart=true (fallback).
   * Question: \"Count how many research questions this paper addresses.\" → query_type=\"text\", operations=[\"count\"], expected_format=\"int\".
@@ -145,7 +153,7 @@ def _default_router_llm_callable(*, question: str, config: RouterLLMConfig) -> s
     if config.backend == "qwen":
         return qwen_llm_call(messages, model=config.model, json_mode=True)
     result = gpt_llm_call(messages, model=config.model, json_mode=True)
-    print("router raw:", result)
+    # print("router raw:", result)
     return result
 
 
@@ -184,6 +192,7 @@ class QuestionRouter:
         risk = self._parse_risk(data.get("risk") or {})
         constraints = self._parse_constraints(data.get("constraints") or {})
         confidence = self._parse_confidence(data.get("confidence"))
+        candidates = self._parse_candidates(data.get("candidates"))
 
         decision = RouterDecision(
             query=query,
@@ -193,6 +202,7 @@ class QuestionRouter:
             constraints=constraints,
             confidence=confidence,
             raw=data,
+            candidates=candidates,
         )
 
         decision = normalize_router_decision(decision)
@@ -256,6 +266,23 @@ class QuestionRouter:
                         result.append(trimmed)
             return result
 
+        def _parse_threshold_value(raw) -> Optional[float]:
+            if isinstance(raw, (int, float)):
+                return float(raw)
+            if isinstance(raw, str):
+                try:
+                    return float(raw.strip().replace("%", ""))
+                except ValueError:
+                    return None
+            return None
+
+        def _parse_comparator_value(raw) -> Optional[str]:
+            if isinstance(raw, str):
+                trimmed = raw.strip()
+                if trimmed in {">", ">=", "<", "<=", "==", "!=", "="}:
+                    return "==" if trimmed == "=" else trimmed
+            return None
+
         expected_format = payload.get("expected_format")
         if not isinstance(expected_format, str) or not expected_format.strip():
             expected_format = None
@@ -280,6 +307,8 @@ class QuestionRouter:
             section_cues=_as_str_list("section_cues"),
             keywords=_as_str_list("keywords"),
             objects_scope=objects_scope,
+            threshold=_parse_threshold_value(payload.get("threshold")),
+            comparator=_parse_comparator_value(payload.get("comparator")),
         )
 
     def _parse_risk(self, payload) -> RouterRisk:
@@ -314,6 +343,29 @@ class QuestionRouter:
         )
 
     @staticmethod
+    def _parse_candidates(payload) -> List[Tuple[str, float]]:
+        if not isinstance(payload, list):
+            return []
+        out: List[Tuple[str, float]] = []
+        for item in payload[:3]:
+            if isinstance(item, dict):
+                qt = item.get("query_type") or item.get("type")
+                score = item.get("score")
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                qt, score = item[0], item[1]
+            else:
+                continue
+            if not isinstance(qt, str):
+                continue
+            try:
+                score_f = float(score)
+            except (TypeError, ValueError):
+                score_f = 0.0
+            score_f = max(0.0, min(1.0, score_f))
+            out.append((qt.strip().lower(), score_f))
+        return out
+
+    @staticmethod
     def _parse_confidence(value) -> float:
         try:
             confidence = float(value)
@@ -329,7 +381,15 @@ def normalize_router_decision(decision: RouterDecision) -> RouterDecision:
     risk = decision.risk
     query_type = decision.query_type.strip().lower() if decision.query_type else "text"
 
-    ops = [op.lower() for op in (signals.operations or [])]
+    ops: List[str] = []
+    seen_ops: set[str] = set()
+    for raw_op in signals.operations or []:
+        if not isinstance(raw_op, str):
+            continue
+        lowered = raw_op.strip().lower()
+        if lowered and lowered not in seen_ops:
+            seen_ops.add(lowered)
+            ops.append(lowered)
     keywords = [kw.lower() for kw in (signals.keywords or [])]
     units = [unit.lower() for unit in (signals.units or [])]
     objects = [obj.strip() for obj in (signals.objects or []) if obj.strip()]
@@ -341,6 +401,16 @@ def normalize_router_decision(decision: RouterDecision) -> RouterDecision:
     need_visual = bool(risk.need_visual or objects)
     need_table = bool(risk.need_table or textual_percentage or mentions_table)
 
+    comparator = (signals.comparator or "").strip() if signals.comparator else None
+    if comparator == "=":
+        comparator = "=="
+    threshold_value = signals.threshold
+    if comparator and threshold_value is not None:
+        for auto_op in ("filter", "lookup"):
+            if auto_op not in seen_ops:
+                ops.append(auto_op)
+                seen_ops.add(auto_op)
+
     # Preference rules
     if need_visual:
         if any(op in {"count", "sum"} for op in ops) or signals.page_hint:
@@ -350,6 +420,12 @@ def normalize_router_decision(decision: RouterDecision) -> RouterDecision:
     else:
         if query_type in {"visual_count", "visual_presence", "visual_compare", "visual_trend"}:
             query_type = "text"
+
+    if query_type in VISUAL_QUERY_TYPES and need_table and not need_visual:
+        query_type = "table"
+    if query_type == "table" and need_visual and not objects:
+        need_visual = False
+        risk = replace(risk, need_visual=False)
 
     if query_type in {"numeric_compute", "text"} and need_table:
         query_type = "table"
@@ -363,7 +439,16 @@ def normalize_router_decision(decision: RouterDecision) -> RouterDecision:
     if query_type not in VISUAL_QUERY_TYPES and signals.objects_scope is not None:
         signals = replace(signals, objects_scope=None)
 
-    return replace(decision, query_type=query_type, signals=signals)
+    if comparator:
+        comparator = comparator if comparator in {">", ">=", "<", "<=", "==", "!="} else None
+    updated_signals = replace(
+        signals,
+        operations=ops,
+        comparator=comparator if comparator else None,
+        threshold=threshold_value if threshold_value is not None else None,
+    )
+
+    return replace(decision, query_type=query_type, signals=updated_signals, risk=risk)
 
 
 __all__ = ["QuestionRouter", "RouterLLMConfig", "RouterLLMCallable", "normalize_router_decision"]

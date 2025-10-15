@@ -20,6 +20,7 @@ from .schemas import (
     RetrievalHit,
     RerankSpec,
     RouterDecision,
+    RouterSignals,
     StrategyKind,
     StrategyPlan,
     StrategyStage,
@@ -35,6 +36,17 @@ DEFAULTS = {
     "mmr_lambda": 0.7,
     "coverage_gate": 0.5,
 }
+
+VISUAL_QUERY_TYPES = {
+    "visual_count",
+    "visual_presence",
+    "visual_compare",
+    "visual_trend",
+    "metadata_visual",
+}
+
+VISUAL_KEYWORDS = {"image", "photo", "map", "figure"}
+TEXT_GUARD_UNITS = {"%", "percent", "percentage"}
 
 
 @dataclass
@@ -150,28 +162,72 @@ class Planner:
 
         signals = decision.signals
         risk = decision.risk
+        candidates = _normalize_candidates(decision)
+        ordered_candidates = reorder_with_textual_guard(decision, candidates)
 
-        methods = _methods_for(
-            decision.query_type,
-            need_table=risk.need_table,
-            need_chart=risk.need_chart,
-            need_visual=risk.need_visual,
-        )
+        stages: List[StrategyStage] = []
+        steps: List[StrategyStep] = []
+        remaining_calls = max_calls
 
-        stages = [
-            StrategyStage(
-                stage="primary",
+        if not ordered_candidates:
+            ordered_candidates = [(decision.query_type, decision.confidence)]
+
+        for idx, (qt, score) in enumerate(ordered_candidates[:2]):
+            if remaining_calls <= 0:
+                break
+            stage_name = f"{qt}_stage_{idx + 1}"
+            stage_suffix = f"_s{idx + 1}"
+            stage_steps = _build_steps_from_router(
+                decision,
+                max_calls=remaining_calls,
+                query_type_override=qt,
+                step_suffix=stage_suffix,
+            )
+            if not stage_steps:
+                continue
+            steps.extend(stage_steps)
+            remaining_calls = max(0, max_calls - len(steps))
+
+            stage_step_ids = [step.step_id for step in stage_steps if step.step_id]
+            methods = _methods_for(
+                qt,
+                need_table=risk.need_table or qt == "table",
+                need_chart=risk.need_chart or qt == "chart",
+                need_visual=risk.need_visual or qt in VISUAL_QUERY_TYPES,
+            )
+            run_if = None if idx == 0 else "prev_quality < 0.75"
+            stage = StrategyStage(
+                stage=stage_name,
                 methods=methods,
                 k_pages=DEFAULTS["k_pages"],
                 k_nodes=DEFAULTS["k_nodes"],
                 page_window=DEFAULTS["page_window"],
-                params={"per_page_limit": 2},
+                params={"per_page_limit": 2, "candidate_score": score},
+                run_if=run_if,
+                step_ids=stage_step_ids,
             )
-        ]
+            stages.append(stage)
 
-        steps = _build_steps_from_router(decision, max_calls=max_calls)
+        if not steps:
+            steps = _build_steps_from_router(decision, max_calls=max_calls)
+            stages = [
+                StrategyStage(
+                    stage="primary",
+                    methods=_methods_for(
+                        decision.query_type,
+                        need_table=risk.need_table,
+                        need_chart=risk.need_chart,
+                        need_visual=risk.need_visual,
+                    ),
+                    k_pages=DEFAULTS["k_pages"],
+                    k_nodes=DEFAULTS["k_nodes"],
+                    page_window=DEFAULTS["page_window"],
+                    params={"per_page_limit": 2},
+                )
+            ]
+
         step_count = len(steps)
-        strategy_kind = StrategyKind.SINGLE if step_count <= 1 else StrategyKind.COMPOSITE
+        strategy_kind = StrategyKind.SINGLE if len(stages) <= 1 and step_count <= 1 else StrategyKind.COMPOSITE
 
         rerank = RerankSpec(
             fuse="RRF",
@@ -225,20 +281,17 @@ def _methods_for(
     need_visual: bool,
 ) -> List[str]:
     qt = (query_type or "").lower()
-    if qt in {"text", "definition", "list"}:
-        return ["bm25_node", "dense_node", "toc_anchor"]
-    if qt == "table" or need_table:
-        base = ["bm25_node", "table_index"]
+    if qt in {"table", "price_total", "numeric_compute"} or need_table:
+        base = ["table_index.search", "extract.column", "compute.filter"]
         if need_chart:
-            base.append("chart_index")
+            base.append("chart_index.search")
         return base
-    if qt == "chart" or (need_chart and not need_table):
-        return ["bm25_node", "chart_index"]
-    if qt in {"visual_count", "visual_presence", "visual_compare", "visual_trend", "metadata_visual"} or need_visual:
-        return ["page_locator", "figure_finder", "chart_index"]
-    if qt in {"price_total", "numeric_compute", "cross_page", "multi_modal", "hybrid"}:
-        return ["bm25_node", "dense_node", "table_index", "chart_index"]
-    return ["bm25_node", "dense_node"]
+    if qt in {"chart"} or need_chart:
+        return ["chart_index.search", "extract.chart_read_axis"]
+    if qt in VISUAL_QUERY_TYPES or need_visual:
+        return ["page_locator.locate", "figure_finder.find_regions", "vlm.answer"]
+    # 默认文本/混合任务
+    return ["bm25_node.search", "dense_node.search"]
 
 
 def _features_for(signals) -> List[str]:
@@ -247,18 +300,35 @@ def _features_for(signals) -> List[str]:
         feats.append("year")
     if signals.units:
         feats.append("unit")
-    if signals.page_hint:
-        feats.append("page")
-    return feats
+        if signals.page_hint:
+            feats.append("page")
+        return feats
 
 
-def _build_steps_from_router(decision: RouterDecision, *, max_calls: int) -> List[StrategyStep]:
+def _build_steps_from_router(
+    decision: RouterDecision,
+    *,
+    max_calls: int,
+    query_type_override: Optional[str] = None,
+    step_suffix: str = "",
+) -> List[StrategyStep]:
     signals = decision.signals
-    query_type = (decision.query_type or "").lower()
+    query_type = (query_type_override or decision.query_type or "").lower()
     steps: List[StrategyStep] = []
     added: Set[Tuple[str, Tuple[Tuple[str, object], ...]]] = set()
 
     keywords = _compose_keywords(decision)
+    base_query = decision.query.strip()
+    year_phrase = " ".join(str(year) for year in (signals.years or []))
+    operations_phrase = " ".join(signals.operations or [])
+    object_phrase = " ".join(signals.objects or [])
+    units_phrase = " ".join(signals.units or [])
+    enriched_query = " ".join(
+        part for part in [base_query, units_phrase, year_phrase, operations_phrase, object_phrase] if part
+    ).strip() or base_query
+    suffix = step_suffix
+    table_like_types = {"table", "numeric_compute", "price_total"}
+    chart_like_types = {"chart"}
 
     def _add_step(
         tool: str,
@@ -276,156 +346,168 @@ def _build_steps_from_router(decision: RouterDecision, *, max_calls: int) -> Lis
         if key in added:
             return
         added.add(key)
+        suffixed_step_id = f"{step_id}{step_suffix}" if step_id else None
+        suffixed_save = f"{save_as}{step_suffix}" if save_as else save_as
+        suffixed_uses = [f"{use}{step_suffix}" for use in uses] if uses else None
         steps.append(
             StrategyStep(
                 tool=tool,
                 args=args,
-                step_id=step_id,
+                step_id=suffixed_step_id,
                 step_type=step_type,
-                save_as=save_as,
+                save_as=suffixed_save,
                 when=when,
-                uses=uses,
+                uses=suffixed_uses,
             )
         )
 
-    # Page / label hints
-    for page in signals.page_hint or []:
-        try:
-            page_int = int(page)
-        except (TypeError, ValueError):
-            continue
+    def _build_text_steps() -> None:
         _add_step(
-            "jump_to_page",
-            {"page": page_int},
-            step_id=f"page_{page_int}",
-            step_type="move",
-        )
-
-    for label in (signals.figure_hint or []) + (signals.table_hint or []):
-        cleaned = label.strip()
-        if not cleaned:
-            continue
-        _add_step(
-            "jump_to_label",
-            {"label": cleaned},
-            step_id=f"label_{cleaned}",
-            step_type="move",
-        )
-
-    # Main retrieval
-    base_query = decision.query.strip()
-    year_phrase = " ".join(str(year) for year in (signals.years or []))
-    operations_phrase = " ".join(signals.operations or [])
-    object_phrase = " ".join(signals.objects or [])
-    units_phrase = " ".join(signals.units or [])
-
-    enriched_query = " ".join(
-        part
-        for part in [base_query, units_phrase, year_phrase, operations_phrase, object_phrase]
-        if part
-    ).strip() or base_query
-
-    if query_type in {"text", "definition", "list"}:
-        _add_step(
-            "dense_search",
+            "dense_node.search",
             {"query": enriched_query, "view": "section#gist"},
             step_id="dense_primary",
             step_type="search",
         )
         if keywords:
             _add_step(
-                "sparse_search",
-                {"keywords": keywords[:6], "view": "section#child"},
+                "bm25_node.search",
+                {"keywords": keywords[:8], "view": "section#child"},
                 step_id="sparse_keywords",
                 step_type="search",
             )
         _add_step(
-            "dense_search",
+            "dense_node.search",
             {"query": enriched_query, "view": "section#heading"},
             step_id="dense_heading",
             step_type="search",
         )
 
-    elif query_type == "table":
-        if keywords:
+    def _build_table_steps() -> None:
+        table_step_base = "table_search"
+        table_step_id = f"{table_step_base}{suffix}"
+        column_hints = _collect_column_hints(signals, keywords)
+        value_hints = _collect_value_hints(signals, keywords)
+        filters = _collect_filters(signals)
+        _add_step(
+            "table_index.search",
+            {
+                "query": enriched_query,
+                "column_hints": column_hints[:6],
+                "keywords": keywords[:8],
+                "filters": filters or None,
+            },
+            step_id=table_step_base,
+            step_type="search",
+            save_as="table_hits",
+        )
+        extract_step_base = "table_extract"
+        extract_args: Dict[str, object] = {
+            "source": table_step_id,
+            "value_hints": value_hints[:6],
+            "label_hints": (signals.table_hint or [])[:6],
+            "unit": signals.units[0] if signals.units else None,
+            "years": signals.years[:6],
+        }
+        _add_step(
+            "extract.column",
+            {k: v for k, v in extract_args.items() if v},
+            step_id=extract_step_base,
+            step_type="extract",
+            save_as="table_rows",
+        )
+        threshold = _safe_number(signals.threshold)
+        comparator = _normalize_comparator(signals.comparator)
+        if threshold is not None and comparator:
             _add_step(
-                "sparse_search",
-                {"keywords": keywords[:8], "view": "section#child"},
-                step_id="table_sparse",
-                step_type="search",
-            )
-        _add_step(
-            "dense_search",
-            {"query": enriched_query, "view": "table"},
-            step_id="table_dense",
-            step_type="search",
-        )
-        _add_step(
-            "hybrid_search",
-            {"query": enriched_query, "keywords": keywords[:6], "view": "section#gist"},
-            step_id="table_hybrid",
-            step_type="search",
-        )
-
-    elif query_type == "chart":
-        _add_step(
-            "dense_search",
-            {"query": enriched_query, "view": "image"},
-            step_id="chart_dense",
-            step_type="search",
-        )
-        if keywords:
-            _add_step(
-                "sparse_search",
-                {"keywords": keywords[:6], "view": "section#child"},
-                step_id="chart_sparse",
-                step_type="search",
-            )
-
-    elif query_type in {"visual_count", "visual_presence", "visual_compare", "visual_trend", "metadata_visual"}:
-        visual_query = object_phrase or enriched_query or base_query
-        _add_step(
-            "dense_search",
-            {"query": visual_query, "view": "image"},
-            step_id="visual_dense",
-            step_type="search",
-        )
-        if keywords:
-            _add_step(
-                "sparse_search",
-                {"keywords": keywords[:6], "view": "section#child"},
-                step_id="visual_sparse",
-                step_type="search",
+                "compute.filter",
+                {
+                    "source": f"{extract_step_base}{suffix}",
+                    "threshold": threshold,
+                    "comparator": comparator,
+                    "unit": signals.units[0] if signals.units else None,
+                },
+                step_id="table_filter",
+                step_type="compute",
             )
 
+    def _build_chart_steps() -> None:
+        chart_step_base = "chart_search"
+        chart_step_id = f"{chart_step_base}{suffix}"
+        _add_step(
+            "chart_index.search",
+            {
+                "query": enriched_query,
+                "keywords": keywords[:8],
+                "units": signals.units[:4],
+                "years": signals.years[:4],
+            },
+            step_id=chart_step_base,
+            step_type="search",
+            save_as="chart_hits",
+        )
+        _add_step(
+            "extract.chart_read_axis",
+            {"source": chart_step_id},
+            step_id="chart_axis",
+            step_type="extract",
+        )
+
+    def _build_visual_steps() -> None:
+        pages = _normalize_page_hints(signals.page_hint)
+        figures = signals.figure_hint or []
+        page_step_base = "page_loc"
+        page_step_id = f"{page_step_base}{suffix}"
+        if pages:
+            _add_step(
+                "page_locator.locate",
+                {"pages": pages},
+                step_id=page_step_base,
+                step_type="move",
+                save_as="page_records",
+            )
+        figure_step_base = "figure_regions"
+        figure_step_id = f"{figure_step_base}{suffix}"
+        figure_args: Dict[str, object] = {}
+        if pages:
+            figure_args["pages"] = pages
+        if pages or figures:
+            figure_args["source"] = page_step_id if pages else None
+        if figures:
+            figure_args.setdefault("labels", figures)
+        figure_args["kinds"] = ["image"]
+        _add_step(
+            "figure_finder.find_regions",
+            {k: v for k, v in figure_args.items() if v},
+            step_id=figure_step_base,
+            step_type="extract",
+            uses=[page_step_base] if pages else None,
+            save_as="figure_regions",
+        )
+        vlm_args: Dict[str, object] = {
+            "question": decision.query,
+        }
+        if pages:
+            vlm_args["page_hint"] = list(pages)
+        if signals.objects:
+            vlm_args["objects"] = list(signals.objects)
+        if figures:
+            vlm_args["figure_hint"] = list(figures)
+        _add_step(
+            "vlm.answer",
+            vlm_args,
+            step_id="vlm_answer",
+            step_type="vision",
+            uses=[figure_step_base] + ([page_step_base] if pages else []),
+        )
+
+    if query_type in VISUAL_QUERY_TYPES:
+        _build_visual_steps()
+    elif query_type in table_like_types:
+        _build_table_steps()
+    elif query_type in chart_like_types:
+        _build_chart_steps()
     else:
-        _add_step(
-            "dense_search",
-            {"query": enriched_query, "view": "section#gist"},
-            step_id="dense_primary",
-            step_type="search",
-        )
-        if keywords:
-            _add_step(
-                "sparse_search",
-                {"keywords": keywords[:6], "view": "section#child"},
-                step_id="sparse_keywords",
-                step_type="search",
-            )
-        if signals.page_hint:
-            _add_step(
-                "dense_search",
-                {"query": enriched_query, "view": "section#heading"},
-                step_id="dense_heading",
-                step_type="search",
-            )
-        if query_type in {"numeric_compute", "price_total"} and units_phrase:
-            _add_step(
-                "sparse_search",
-                {"keywords": [units_phrase], "view": "section#child"},
-                step_id="unit_sparse",
-                step_type="search",
-            )
+        _build_text_steps()
 
     return steps
 
@@ -463,11 +545,16 @@ def _compose_keywords(decision: RouterDecision) -> List[str]:
 def _step_key(tool: str, args: Dict[str, object]) -> Tuple[str, Tuple[Tuple[str, object], ...]]:
     normalized_args: List[Tuple[str, object]] = []
     for key, value in sorted(args.items()):
-        if isinstance(value, list):
-            normalized_args.append((key, tuple(value)))
-        else:
-            normalized_args.append((key, value))
+        normalized_args.append((key, _to_hashable(value)))
     return tool, tuple(normalized_args)
+
+
+def _to_hashable(value: object) -> object:
+    if isinstance(value, list):
+        return tuple(_to_hashable(v) for v in value)
+    if isinstance(value, dict):
+        return tuple((k, _to_hashable(v)) for k, v in sorted(value.items()))
+    return value
 
 
 def _collect_retrieval_keys(decision: RouterDecision, steps: List[StrategyStep]) -> List[str]:
@@ -495,6 +582,186 @@ def _collect_retrieval_keys(decision: RouterDecision, steps: List[StrategyStep])
         if base and base not in seen:
             keys.insert(0, base)
     return keys[:12]
+
+
+def _collect_column_hints(signals: RouterSignals, keywords: List[str]) -> List[str]:
+    hints: List[str] = []
+    for container in (
+        signals.table_hint or [],
+        signals.section_cues or [],
+        signals.objects or [],
+    ):
+        for item in container:
+            if isinstance(item, str):
+                cleaned = item.strip()
+                if cleaned and cleaned not in hints:
+                    hints.append(cleaned)
+    for kw in keywords:
+        if kw not in hints:
+            hints.append(kw)
+    return hints
+
+
+def _collect_value_hints(signals: RouterSignals, keywords: List[str]) -> List[str]:
+    hints: List[str] = []
+    for unit in signals.units or []:
+        cleaned = unit.strip()
+        if cleaned and cleaned not in hints:
+            hints.append(cleaned)
+    for op in signals.operations or []:
+        cleaned = op.strip()
+        if cleaned and cleaned not in hints:
+            hints.append(cleaned)
+    for kw in keywords:
+        if kw not in hints:
+            hints.append(kw)
+    return hints
+
+
+def _collect_filters(signals: RouterSignals) -> Dict[str, object]:
+    payload: Dict[str, object] = {}
+    if signals.units:
+        payload["unit"] = signals.units[0]
+    if signals.years:
+        payload["years"] = list(signals.years)
+    comparator = _normalize_comparator(signals.comparator)
+    threshold = _safe_number(signals.threshold)
+    if comparator and threshold is not None:
+        payload["comparator"] = comparator
+        payload["threshold"] = threshold
+    return {k: v for k, v in payload.items() if v not in (None, [], {})}
+
+
+def _safe_number(value) -> Optional[float]:
+    try:
+        if isinstance(value, str):
+            cleaned = value.strip().replace(",", "")
+            if cleaned.endswith("%"):
+                cleaned = cleaned[:-1]
+            return float(cleaned)
+        if isinstance(value, (int, float)):
+            return float(value)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _normalize_comparator(value: Optional[str]) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text == "=":
+        text = "=="
+    if text in {">", ">=", "<", "<=", "==", "!="}:
+        return text
+    return None
+
+
+def _normalize_page_hints(hints: Optional[List[int]]) -> List[int]:
+    normalized: List[int] = []
+    if not hints:
+        return normalized
+    for item in hints:
+        try:
+            page = int(item)
+        except (TypeError, ValueError):
+            continue
+        if page < 0:
+            continue
+        if page not in normalized:
+            normalized.append(page)
+    return normalized
+
+
+def _normalize_candidates(decision: RouterDecision) -> List[Tuple[str, float]]:
+    ordered: List[Tuple[str, float]] = []
+    seen: Set[str] = set()
+
+    for qt, score in decision.candidates:
+        if not qt:
+            continue
+        normalized = qt.strip().lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            score_value = float(score)
+        except (TypeError, ValueError):
+            score_value = 0.0
+        ordered.append((normalized, max(0.0, min(1.0, score_value))))
+
+    primary = (decision.query_type or "").strip().lower()
+    if primary and primary not in seen:
+        try:
+            primary_conf = float(decision.confidence)
+        except (TypeError, ValueError):
+            primary_conf = 0.0
+        ordered.insert(0, (primary, max(0.0, min(1.0, primary_conf))))
+        seen.add(primary)
+
+    def _ensure_candidate(kind: str, score: float) -> None:
+        if kind and kind not in seen:
+            seen.add(kind)
+            ordered.append((kind, max(0.0, min(1.0, score))))
+
+    textual_intent = bool(decision.signals.units or decision.signals.operations or decision.signals.table_hint)
+    chart_intent = bool(decision.signals.figure_hint) or any(
+        kw for kw in (decision.signals.keywords or []) if "chart" in kw.lower() or "graph" in kw.lower()
+    )
+    if textual_intent:
+        fallback_score = max(decision.confidence * 0.6, 0.35)
+        _ensure_candidate("table", fallback_score)
+    if chart_intent and "chart" not in seen:
+        fallback_score = max(decision.confidence * 0.5, 0.3)
+        _ensure_candidate("chart", fallback_score)
+    if decision.risk.need_visual and "visual_count" not in seen and "visual_presence" not in seen:
+        _ensure_candidate(decision.query_type.strip().lower() if decision.query_type else "visual_count", decision.confidence * 0.5)
+    return ordered
+
+
+def reorder_with_textual_guard(
+    decision: RouterDecision,
+    order: List[Tuple[str, float]],
+) -> List[Tuple[str, float]]:
+    if not order:
+        return order
+
+    signals = decision.signals
+    normalized = list(order)
+    units = {str(unit).strip().lower() for unit in signals.units or [] if str(unit).strip()}
+    has_percentage = any(unit in TEXT_GUARD_UNITS for unit in units)
+    numerical_ops = {op.strip().lower() for op in (signals.operations or []) if isinstance(op, str)}
+    textual_intent = bool(units or numerical_ops or signals.table_hint)
+
+    question_text = decision.query.lower() if isinstance(decision.query, str) else ""
+    signal_tokens = [token.lower() for token in (signals.keywords or []) if isinstance(token, str)]
+    signal_tokens += [token.lower() for token in (signals.section_cues or []) if isinstance(token, str)]
+    signal_tokens += [token.lower() for token in (signals.objects or []) if isinstance(token, str)]
+    visual_terms = set(signal_tokens)
+    if question_text:
+        visual_terms.add(question_text)
+    strong_visual = any(vk in token for token in visual_terms for vk in VISUAL_KEYWORDS)
+
+    def _pop_candidate(kind: str) -> Optional[Tuple[str, float]]:
+        for idx, item in enumerate(normalized):
+            if item[0] == kind:
+                return normalized.pop(idx)
+        return None
+
+    if textual_intent and has_percentage:
+        table_candidate = _pop_candidate("table")
+        if table_candidate:
+            insert_idx = 1 if strong_visual and normalized else 0
+            normalized.insert(insert_idx, table_candidate)
+
+    chart_intent = decision.risk.need_chart or any("chart" in token for token in signal_tokens)
+    if chart_intent:
+        chart_candidate = _pop_candidate("chart")
+        if chart_candidate:
+            insert_idx = 1 if normalized and normalized[0][0] == "table" else 0
+            normalized.insert(insert_idx, chart_candidate)
+
+    return normalized
 
 
 __all__ = ["DocGraphNavigator", "Planner"]

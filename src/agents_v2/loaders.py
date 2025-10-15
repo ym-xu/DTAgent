@@ -11,7 +11,7 @@ import json
 from collections import defaultdict
 import re
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Set
 
 from .planner import DocGraphNavigator
 from .retriever import RetrieverResources
@@ -49,11 +49,17 @@ def build_resources_from_index(doc_dir: Path) -> Tuple[RetrieverResources, DocGr
 
     summary = _read_json(summary_path)
     nodes = summary.get("nodes", [])
-    doctree_map = _load_doctree_map(doc_dir)
+    doctree_map, parent_map = _load_doctree_map(doc_dir)
 
     label_index: Dict[str, str] = {}
     page_index: Dict[int, List[str]] = defaultdict(list)
     text_index: Dict[str, str] = {}
+    table_structs: Dict[str, Dict[str, object]] = {}
+    node_roles: Dict[str, str] = {}
+    image_paths: Dict[str, str] = {}
+    image_meta: Dict[str, Dict[str, object]] = {}
+    node_pages: Dict[str, int] = {}
+    node_physical_pages: Dict[str, int] = {}
 
     FIGURE_LABEL_RE = re.compile(r"\b(?:Figure|Fig\.?)\s*([A-Za-z0-9]+)", re.IGNORECASE)
     TABLE_LABEL_RE = re.compile(r"\bTable\s*([A-Za-z0-9]+)", re.IGNORECASE)
@@ -93,10 +99,33 @@ def build_resources_from_index(doc_dir: Path) -> Tuple[RetrieverResources, DocGr
                 aliases.append(label)
         return aliases
 
+    def _register_page(page_value, node_id: str) -> None:
+        if page_value is None:
+            return
+        if isinstance(page_value, int):
+            if node_id not in page_index[page_value]:
+                page_index[page_value].append(node_id)
+        elif isinstance(page_value, str):
+            cleaned = page_value.strip()
+            if not cleaned:
+                return
+            if cleaned.isdigit():
+                key = int(cleaned)
+                if node_id not in page_index[key]:
+                    page_index[key].append(node_id)
+            else:
+                roman_val = _roman_to_int(cleaned)
+                if roman_val is not None:
+                    if node_id not in page_index[roman_val]:
+                        page_index[roman_val].append(node_id)
+
+    summary_ids: Set[str] = set()
+
     for node in nodes:
         node_id = node.get("node_id")
         if not isinstance(node_id, str):
             continue
+        summary_ids.add(node_id)
         label = node.get("label")
         if isinstance(label, str):
             _register_label(label, node_id, prioritize=True)
@@ -105,16 +134,75 @@ def build_resources_from_index(doc_dir: Path) -> Tuple[RetrieverResources, DocGr
         title_norm = node.get("title_norm")
         _register_label(title_norm or None, node_id)
         role = node.get("role")
+        if isinstance(role, str):
+            node_roles[node_id] = role
         if role in {"image", "table"}:
             tree_node = doctree_map.get(node_id) if doctree_map else None
             for alias in _extract_caption_aliases(node, tree_node):
                 _register_label(alias, node_id, prioritize=True)
+        tree_node = doctree_map.get(node_id) if doctree_map else None
         page_idx = node.get("page_idx")
         if isinstance(page_idx, int):
-            page_index[page_idx].append(node_id)
+            _register_page(page_idx, node_id)
+            _register_page(page_idx + 1, node_id)
+            if page_idx >= 0:
+                node_physical_pages.setdefault(node_id, page_idx + 1)
+        logical_page = _resolve_logical_page(node_id, tree_node, doctree_map, parent_map)
+        if logical_page is not None:
+            _register_page(logical_page, node_id)
+            node_pages[node_id] = int(logical_page)
         dense_text = node.get("dense_text") or node.get("summary") or node.get("title")
         if isinstance(dense_text, str) and dense_text.strip():
             text_index[node_id] = dense_text.strip()
+        if role == "table":
+            table_info = _parse_table_node(tree_node) if tree_node else {}
+            if table_info:
+                table_structs[node_id] = table_info
+        elif role == "image":
+            image_info = _parse_image_node(tree_node, base_dir=doc_dir) if tree_node else None
+            if image_info:
+                image_meta[node_id] = image_info
+                if image_info.get("path"):
+                    image_paths[node_id] = str(image_info["path"])
+
+    if doctree_map:
+        for node_id, tree_node in doctree_map.items():
+            if not isinstance(node_id, str):
+                continue
+            if node_id in summary_ids:
+                continue
+            role = tree_node.get("role") or tree_node.get("type")
+            if isinstance(role, str):
+                node_roles.setdefault(node_id, role)
+            logical_page = _resolve_logical_page(node_id, tree_node, doctree_map, parent_map)
+            if logical_page is not None:
+                _register_page(logical_page, node_id)
+                node_pages[node_id] = int(logical_page)
+            page_idx = tree_node.get("page_idx")
+            if isinstance(page_idx, int):
+                _register_page(page_idx + 1, node_id)
+                _register_page(page_idx, node_id)
+                if page_idx >= 0:
+                    node_physical_pages.setdefault(node_id, page_idx + 1)
+            if role == "image":
+                image_info = _parse_image_node(tree_node, base_dir=doc_dir)
+                if image_info:
+                    text_index[node_id] = (image_info.get("summary") or image_info.get("caption") or "").strip()
+                    table_structs.pop(node_id, None)
+                    image_meta[node_id] = image_info
+                    if image_info.get("path"):
+                        image_paths[node_id] = str(image_info["path"])
+            elif role == "table":
+                table_info = _parse_table_node(tree_node)
+                if table_info:
+                    table_structs[node_id] = table_info
+                    preview = table_info.get("preview") or table_info.get("caption")
+                    if preview:
+                        text_index[node_id] = preview
+            else:
+                text = tree_node.get("text")
+                if isinstance(text, str) and text.strip():
+                    text_index.setdefault(node_id, text.strip())
 
     dense_views, dense_base_ids = _load_dense_views(doc_dir)
     sparse_docs = _load_sparse_docs(doc_dir)
@@ -126,6 +214,13 @@ def build_resources_from_index(doc_dir: Path) -> Tuple[RetrieverResources, DocGr
         dense_views=dense_views,
         dense_base_ids=dense_base_ids,
         sparse_docs=sparse_docs,
+        tables=table_structs,
+        node_roles=node_roles,
+        image_paths=image_paths,
+        image_meta=image_meta,
+        node_pages=node_pages,
+        node_physical_pages=node_physical_pages,
+        base_dir=doc_dir,
     )
 
     graph = _build_graph(edges_path)
@@ -234,23 +329,38 @@ def build_observer_store(doc_dir: Path) -> Dict[str, NodeEvidence]:
             extra={k: v for k, v in extra.items() if v is not None},
         )
 
-    doctree_map = _load_doctree_map(doc_dir)
+    doctree_map, _ = _load_doctree_map(doc_dir)
     if doctree_map:
         for node_id, node in doctree_map.items():
-            if node_id not in store:
-                continue
             role = node.get("role") or node.get("type")
+            if node_id in store:
+                ev = store[node_id]
+            else:
+                modality = "text"
+                if role == "image":
+                    modality = "image"
+                elif role == "table":
+                    modality = "table"
+                content = node.get("text") if isinstance(node.get("text"), str) else None
+                page_idx = node.get("page_idx")
+                ev = NodeEvidence(
+                    node_id=node_id,
+                    modality=modality,
+                    content=content,
+                    extra={k: v for k, v in {"page_idx": page_idx, "label": node.get("label")}.items() if v is not None},
+                )
+                store[node_id] = ev
+
             if role == "table":
                 table_info = _parse_table_node(node)
                 if table_info:
-                    ev = store[node_id]
                     ev.extra.setdefault("table", table_info)
                     if table_info.get("preview"):
                         ev.content = table_info["preview"]
             elif role == "image":
                 image_info = _parse_image_node(node, base_dir=doc_dir)
                 if image_info:
-                    ev = store[node_id]
+                    ev.modality = "image"
                     ev.extra.setdefault("image", image_info)
                     if image_info.get("path"):
                         ev.extra.setdefault("image_path", image_info["path"])
@@ -259,7 +369,6 @@ def build_observer_store(doc_dir: Path) -> Dict[str, NodeEvidence]:
             elif role == "list":
                 list_info = _parse_list_node(node)
                 if list_info:
-                    ev = store[node_id]
                     items = list_info.get("items") or []
                     if items:
                         ev.extra.setdefault("structured_list", items)
@@ -285,7 +394,7 @@ def build_observer_store(doc_dir: Path) -> Dict[str, NodeEvidence]:
     return store
 
 
-def _load_doctree_map(doc_dir: Path) -> Dict[str, dict]:
+def _load_doctree_map(doc_dir: Path) -> Tuple[Dict[str, dict], Dict[str, str]]:
     path = doc_dir / "doctree.mm.json"
     if not path.exists():
         parent = doc_dir.parent
@@ -293,21 +402,24 @@ def _load_doctree_map(doc_dir: Path) -> Dict[str, dict]:
         if candidate.exists():
             path = candidate
     if not path.exists():
-        return {}
+        return {}, {}
     root = _read_json(path)
-    stack = [root]
+    stack = [(root, None)]
     id_map: Dict[str, dict] = {}
+    parent_map: Dict[str, str] = {}
     while stack:
-        cur = stack.pop()
+        cur, parent_id = stack.pop()
         if not isinstance(cur, dict):
             continue
         nid = cur.get("node_id")
         if isinstance(nid, str):
             id_map[nid] = cur
+            if parent_id:
+                parent_map[nid] = parent_id
         for ch in cur.get("children", []) or []:
             if isinstance(ch, dict):
-                stack.append(ch)
-    return id_map
+                stack.append((ch, nid if isinstance(nid, str) else parent_id))
+    return id_map, parent_map
 
 
 def _parse_table_node(node: dict) -> Dict[str, object] | None:
@@ -373,8 +485,59 @@ def _parse_image_node(node: dict, *, base_dir: Path) -> Dict[str, object] | None
         "description": desc,
         "summary": "; ".join(filter(None, [caption, desc])) or None,
         "path": resolved_path,
+        "bbox": node.get("bbox"),
     }
     return out
+
+
+def _roman_to_int(text: str) -> Optional[int]:
+    if not isinstance(text, str):
+        return None
+    s = text.lower()
+    roman_map = {"i": 1, "v": 5, "x": 10, "l": 50, "c": 100, "d": 500, "m": 1000}
+    total = 0
+    prev = 0
+    for ch in reversed(s):
+        value = roman_map.get(ch)
+        if value is None:
+            return None
+        if value < prev:
+            total -= value
+        else:
+            total += value
+            prev = value
+    return total if total > 0 else None
+
+
+def _resolve_logical_page(
+    node_id: str,
+    tree_node: Optional[dict],
+    doctree_map: Dict[str, dict],
+    parent_map: Dict[str, str],
+) -> Optional[int]:
+    current_id = node_id
+    current_node = tree_node or doctree_map.get(current_id)
+    visited: set[str] = set()
+    while current_id and current_id not in visited:
+        visited.add(current_id)
+        if isinstance(current_node, dict):
+            lp = current_node.get("logical_page")
+            if lp is not None:
+                if isinstance(lp, int):
+                    return lp
+                if isinstance(lp, str):
+                    cleaned = lp.strip()
+                    if cleaned.isdigit():
+                        return int(cleaned)
+                    roman_val = _roman_to_int(cleaned)
+                    if roman_val is not None:
+                        return roman_val
+        parent_id = parent_map.get(current_id)
+        if not parent_id:
+            break
+        current_id = parent_id
+        current_node = doctree_map.get(current_id)
+    return None
 
 
 def _extract_caption(node: dict) -> Optional[str]:

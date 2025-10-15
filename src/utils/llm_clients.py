@@ -53,10 +53,13 @@ def gpt_llm_call(
         parts: List[Dict[str, Any]] = [{"type": "text", "text": str(msgs[idx].get("content", ""))}]
         for im in images:
             url = None
-            if isinstance(im, str) and im.startswith("http"):
-                url = im
-            elif isinstance(im, str) and os.path.exists(im):
-                url = _to_data_url(im)
+            if isinstance(im, str):
+                if im.startswith("http"):
+                    url = im
+                elif im.startswith("data:image"):
+                    url = im
+                elif os.path.exists(im):
+                    url = _to_data_url(im)
             if url:
                 parts.append({"type": "image_url", "image_url": {"url": url}})
         msgs[idx]["content"] = parts
@@ -151,4 +154,3 @@ def qwen_llm_call(
         if out is not None:
             return out
         return json.dumps(rsp, ensure_ascii=False)
-

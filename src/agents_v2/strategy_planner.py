@@ -255,7 +255,23 @@ class RetrievalStrategyPlanner:
                                 items.append(cleaned)
                 return items
 
-            if tool in {"dense_search", "sparse_search", "hybrid_search"}:
+            if tool == "jump_to_page":
+                page = args.get("page")
+                if isinstance(page, int):
+                    tool = "page_locator.locate"
+                    args = {"pages": [page]}
+                else:
+                    continue
+            elif tool == "jump_to_label":
+                label = args.get("label")
+                if isinstance(label, str) and label.strip():
+                    tool = "bm25_node.search"
+                    args = {"keywords": [label.strip()], "view": "section#child"}
+                else:
+                    continue
+
+            if tool in {"dense_search", "dense_node.search"}:
+                tool = "dense_node.search"
                 view = args.get("view")
                 if not isinstance(view, str) or view not in allowed_view_set:
                     args["view"] = "section#gist"
@@ -284,15 +300,26 @@ class RetrievalStrategyPlanner:
 
                 if not args.get("query") and not args.get("keywords"):
                     raise RuntimeError(f"{tool} requires a query or keywords")
-            elif tool == "jump_to_page":
-                page = args.get("page")
-                if not isinstance(page, int):
-                    raise RuntimeError("jump_to_page requires integer 'page'")
-            elif tool == "jump_to_label":
-                label = args.get("label")
-                if not isinstance(label, str) or not label.strip():
-                    raise RuntimeError("jump_to_label requires non-empty 'label'")
-                args["label"] = label.strip()
+            elif tool in {"sparse_search", "hybrid_search", "bm25_node.search"}:
+                tool = "bm25_node.search"
+                keywords = _clean_list(args.get("keywords"))
+                if keywords:
+                    args["keywords"] = keywords
+                elif "keywords" in args:
+                    args.pop("keywords", None)
+
+                query = _clean_query(args.get("query"))
+                if query:
+                    args["query"] = query
+                elif "query" in args:
+                    args.pop("query", None)
+
+                view = args.get("view")
+                if isinstance(view, str) and view not in allowed_view_set:
+                    args["view"] = "section#child"
+
+                if not args.get("query") and not args.get("keywords"):
+                    raise RuntimeError("bm25_node.search requires a query or keywords")
 
             def _canonical(value: object):
                 if isinstance(value, list):

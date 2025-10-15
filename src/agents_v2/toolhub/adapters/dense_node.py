@@ -1,7 +1,6 @@
-"""BM25 node search adapter.
+"""Dense node search adapter.
 
-当前实现直接复用 RetrieverManager 的 dense/sparse/hybrid 检索逻辑，
-方便逐步迁移到 ToolHub 执行链。
+复用 RetrieverManager 的 dense_search 能力，逐步迁移到 ToolHub。
 """
 
 from __future__ import annotations
@@ -19,10 +18,9 @@ def search(call: ToolCall) -> ToolResult:
     step = _require_step(call.args.get("_step"))
     memory = call.args.get("_memory")
 
-    # 允许通过 mode 指定实际执行的检索工具（dense/sparse/hybrid）
     mode = str(call.args.get("_source_tool") or step.tool)
-    legacy_tool = call.args.get("_legacy_tool")
-    exec_step = replace(step, tool=legacy_tool) if legacy_tool else step
+    legacy_tool = call.args.get("_legacy_tool") or "dense_search"
+    exec_step = replace(step, tool=legacy_tool)
 
     hits = manager.execute(exec_step, memory)
     status = "ok" if hits else "empty"
@@ -40,13 +38,13 @@ def search(call: ToolCall) -> ToolResult:
 
 def _require_manager(manager: Optional[RetrieverManager]) -> RetrieverManager:
     if not isinstance(manager, RetrieverManager):
-        raise RuntimeError("bm25_node.search requires RetrieverManager instance")
+        raise RuntimeError("dense_node.search requires RetrieverManager instance")
     return manager
 
 
 def _require_step(step: Optional[StrategyStep]) -> StrategyStep:
     if not isinstance(step, StrategyStep):
-        raise RuntimeError("bm25_node.search requires StrategyStep context")
+        raise RuntimeError("dense_node.search requires StrategyStep context")
     return step
 
 

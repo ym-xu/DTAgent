@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 
 class StrategyKind(str, Enum):
@@ -21,6 +21,19 @@ class StrategyKind(str, Enum):
 
 
 StrategyToolName = Literal[
+    "bm25_node.search",
+    "dense_node.search",
+    "table_index.search",
+    "chart_index.search",
+    "page_locator.locate",
+    "figure_finder.find_regions",
+    "extract.column",
+    "extract.chart_read_axis",
+    "compute.filter",
+    "compute.eval",
+    "vlm.answer",
+    "judger.verify",
+    # legacy support (will be deprecated)
     "jump_to_label",
     "jump_to_page",
     "dense_search",
@@ -58,6 +71,8 @@ class StrategyStage:
     k_nodes: int = 0
     page_window: int = 0
     params: Dict[str, Any] = field(default_factory=dict)
+    run_if: Optional[str] = None
+    step_ids: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -194,6 +209,8 @@ class RouterSignals:
     section_cues: List[str] = field(default_factory=list)
     keywords: List[str] = field(default_factory=list)
     objects_scope: Optional[str] = None
+    threshold: Optional[float] = None
+    comparator: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -221,6 +238,7 @@ class RouterDecision:
     constraints: RouterConstraints = field(default_factory=RouterConstraints)
     confidence: float = 0.0
     raw: Dict[str, Any] = field(default_factory=dict)
+    candidates: List[Tuple[str, float]] = field(default_factory=list)
 
     def describe(self) -> str:
         return (

@@ -136,18 +136,19 @@ The agent operates through an **iterative navigation–observation–reasoning l
 
 **✅ 已完成**
 - 基础模块与数据结构全部落地，并有单元测试覆盖策略、检索、观察、推理及 CLI。
-- Loader 会从 `summary.json`/`dense_coarse.jsonl`/`graph_edges.jsonl` 读取索引，拼出 `DocGraphNavigator` 与 `RetrieverResources`。
-- 表格若以结构化 list/dict 存在，可解析列名/行数据并写入 `structured_table`；Reasoner prompt 会包含这些字段。
+- Loader 会从 `summary.json`/`dense_coarse.jsonl`/`graph_edges.jsonl` 读取索引，拼出 `DocGraphNavigator` 与 `RetrieverResources`，并区分逻辑页/物理页索引供视觉链路使用。
+- Planner 已对接新版 ToolHub：表格问题自动生成 `table_index.search → extract.column → compute.filter`，图表问题走 `chart_index.search → extract.chart_read_axis`，视觉问题采用 `page_locator.locate → figure_finder.find_regions → vlm.answer` 三段式。
+- Router 会输出 query_type 候选列表；Planner 依据候选自动构造多阶段策略并根据覆盖度/置信度门控是否执行后续阶段。
 - CLI 支持 `--llm-backend/--llm-model/--use-image-llm`，可注入自定义 LLM/VLM callable。
-- Reasoner 强制走 LLM 流程；若 LLM 返回空结果，则请求 `REPLAN`。
+- Reasoner 强制走 LLM 流程；若 LLM 返回空结果，则请求 `REPLAN`，并结合 Judger 得分纳入阶段质量函数。
 
 **⏳ 未完成 / 待补充**
 - 表格 HTML 解析：`_parse_table_node` 目前不会解析 HTML `<table>`；需引入解析器提取列/行。
-- 图像“真 VLM”支持：DocTree 尚未提供图片路径；`build_llm_image_analyzer` 只基于 caption 调用 LLM，没有传递像素数据。
+- 真正的视觉模型集成：默认 `vlm.answer` 仍调用 LLM 推理，需要对接真实像素推理服务并补充 ROI 语义。
 - 向量 / BM25 检索仍是轻量文本匹配，尚未对接 `.faiss` 或 BM25 文件。
 - Reasoner prompt 尚未针对不同任务做更细粒度模板（如数值验证、列名指令等）。
-- 缺少日志 / trace 导出，方便排查多轮规划。
-- 表格/图像证据仍需要更细粒度的字段（例如单元格定位、坐标信息）。
+- 缺少完整 trace / metrics 导出，尚未把阶段质量与 Judger 结果写入日志。
+- 表格/图像证据仍需要更细粒度的字段（例如单元格定位、坐标信息），以及 `compute.eval` 等数值工具的实现。
 
 ## ⚙️ 3. Data Flow Summary
 ```text

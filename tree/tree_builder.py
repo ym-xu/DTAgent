@@ -53,6 +53,7 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
     page_idx = item.get("page_idx")
     read_order = item.get("read_order_idx", node_idx)
     bbox = item.get("outline") or item.get("bbox")
+    logical_page = item.get("logical_page")
 
     if t == "text":
         lvl = item.get("node_level", -1)
@@ -66,6 +67,7 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
             "read_order_idx": read_order,
             "role": "paragraph",
             "text": item.get("text", ""),
+            **({"logical_page": logical_page} if logical_page is not None else {}),
             **({"bbox": bbox} if isinstance(bbox, (list, tuple, list)) else {}),
         }
         # Preserve media_link from enhancer (text -> media link)
@@ -83,6 +85,7 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
             "node_id": nid,
             "page_idx": page_idx,
             "read_order_idx": read_order,
+            **({"logical_page": logical_page} if logical_page is not None else {}),
             "image_path": item.get("img_path"),
             **({"bbox": bbox} if isinstance(bbox, (list, tuple, list)) else {}),
         }
@@ -116,6 +119,7 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
             "page_idx": page_idx,
             "read_order_idx": read_order,
             "data": item.get("table_body") or item.get("table_text") or "",
+            **({"logical_page": logical_page} if logical_page is not None else {}),
             # Preserve table raster image path if provided by adapter/enhancer
             **({"image_path": item.get("img_path")} if item.get("img_path") is not None else {}),
             **({"bbox": bbox} if isinstance(bbox, (list, tuple, list)) else {}),
@@ -145,6 +149,7 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
             "node_id": _make_typed_id("eq", node_idx, fallback_idx),
             "page_idx": page_idx,
             "read_order_idx": read_order,
+            **({"logical_page": logical_page} if logical_page is not None else {}),
             "text": item.get("text", ""),
             **({"bbox": bbox} if isinstance(bbox, (list, tuple, list)) else {}),
         }
@@ -161,6 +166,7 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
                 "read_order_idx": read_order,
                 "role": "paragraph",
                 "text": text,
+                **({"logical_page": logical_page} if logical_page is not None else {}),
                 **({"bbox": bbox} if isinstance(bbox, (list, tuple, list)) else {}),
             }
         else:
@@ -171,6 +177,7 @@ def _convert_item_to_leaf(item: dict, *, fallback_idx: int) -> Optional[Dict[str
                 "read_order_idx": read_order,
                 "items": [{"text": str(x)} for x in items],
                 "sub_type": sub_type,
+                **({"logical_page": logical_page} if logical_page is not None else {}),
                 **({"bbox": bbox} if isinstance(bbox, (list, tuple, list)) else {}),
             }
     # ignore structural-only types not useful for QA (header/footer/page_number/etc.)
@@ -286,6 +293,7 @@ def build_mm_doctree(
                 "title_norm": _norm_title(title),
                 "page_idx": it.get("page_idx"),
                 "read_order_idx": it.get("read_order_idx", it.get("node_idx", i)),
+                **({"logical_page": it.get("logical_page")} if it.get("logical_page") is not None else {}),
             }
             # Update heading index
             root["index"]["heading_index"].setdefault("1", {})[sec["title_norm"]] = sec["node_id"]
@@ -321,6 +329,7 @@ def build_mm_doctree(
                 "title_norm": _norm_title(title),
                 "page_idx": it.get("page_idx"),
                 "read_order_idx": it.get("read_order_idx", it.get("node_idx", i)),
+                **({"logical_page": it.get("logical_page")} if it.get("logical_page") is not None else {}),
             }
             lvl_key = str(int(lvl))
             root["index"]["heading_index"].setdefault(lvl_key, {})[sec["title_norm"]] = sec["node_id"]
@@ -343,6 +352,7 @@ def build_mm_doctree(
                 "title_norm": _norm_title(title),
                 "page_idx": it.get("page_idx"),
                 "read_order_idx": it.get("read_order_idx", it.get("node_idx", i)),
+                **({"logical_page": it.get("logical_page")} if it.get("logical_page") is not None else {}),
             }
             # Update heading_index
             lvl_key = str(int(lvl))

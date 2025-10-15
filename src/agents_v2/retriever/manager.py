@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Sequence, Tuple
 
 from ..memory import AgentMemory
@@ -108,12 +109,19 @@ class RetrieverResources:
     """
     检索器依赖的数据索引。
 
-    - label_index:  图表编号到 node_id
-    - page_index:   页码到 node_id 列表
-    - text_index:   node_id 到文本内容（用于 LLM 选择）
-    - dense_views:  variant -> {node_id_variant: text}
+    - label_index:   图表编号到 node_id
+    - page_index:    页码到 node_id 列表
+    - text_index:    node_id 到文本内容（用于 LLM 选择）
+    - dense_views:   variant -> {node_id_variant: text}
     - dense_base_ids: variant -> {node_id_variant: base_node_id}
-    - sparse_docs:  node_id -> 字段字典
+    - sparse_docs:   node_id -> 字段字典
+    - tables:        node_id -> 结构化表格信息
+    - node_roles:    node_id -> role（table/image/text …）
+    - image_paths:   image node_id -> 本地路径
+    - image_meta:    image node_id -> 描述/摘要等
+    - node_pages:    node_id -> 逻辑页码（1-based，若存在）
+    - node_physical_pages: node_id -> 物理页码（1-based，若存在）
+    - base_dir:      文档索引所在目录
     """
 
     label_index: Dict[str, str] = field(default_factory=dict)
@@ -122,6 +130,13 @@ class RetrieverResources:
     dense_views: Dict[str, Dict[str, str]] = field(default_factory=dict)
     dense_base_ids: Dict[str, Dict[str, str]] = field(default_factory=dict)
     sparse_docs: Dict[str, Dict[str, str]] = field(default_factory=dict)
+    tables: Dict[str, Dict[str, object]] = field(default_factory=dict)
+    node_roles: Dict[str, str] = field(default_factory=dict)
+    image_paths: Dict[str, str] = field(default_factory=dict)
+    image_meta: Dict[str, Dict[str, object]] = field(default_factory=dict)
+    node_pages: Dict[str, int] = field(default_factory=dict)
+    node_physical_pages: Dict[str, int] = field(default_factory=dict)
+    base_dir: Optional[Path] = None
 
 
 def build_stub_resources(
@@ -131,6 +146,13 @@ def build_stub_resources(
     text_pairs: Sequence[Tuple[str, str]],
     dense_views: Dict[str, Dict[str, str]] | None = None,
     sparse_docs: Dict[str, Dict[str, str]] | None = None,
+    tables: Dict[str, Dict[str, object]] | None = None,
+    node_roles: Dict[str, str] | None = None,
+    image_paths: Dict[str, str] | None = None,
+    image_meta: Dict[str, Dict[str, object]] | None = None,
+    node_pages: Dict[str, int] | None = None,
+    node_physical_pages: Dict[str, int] | None = None,
+    base_dir: Optional[Path] = None,
 ) -> RetrieverResources:
     """便捷构建器，供测试使用。"""
     label_index = {label: nid for label, nid in label_pairs}
@@ -150,6 +172,13 @@ def build_stub_resources(
         dense_views=dense_views,
         dense_base_ids=dense_base_ids,
         sparse_docs=sparse_docs or {},
+        tables=tables or {},
+        node_roles=node_roles or {},
+        image_paths=image_paths or {},
+        image_meta=image_meta or {},
+        node_pages=node_pages or {},
+        node_physical_pages=node_physical_pages or {},
+        base_dir=base_dir,
     )
 
 
@@ -173,12 +202,16 @@ class RetrieverManager:
             hits = self._jump_to_label(step.args)
         elif tool == "jump_to_page":
             hits = self._jump_to_page(step.args)
-        elif tool == "dense_search":
-            hits = self._dense_search(step.args)
-        elif tool == "sparse_search":
-            hits = self._sparse_search(step.args)
-        elif tool == "hybrid_search":
-            hits = self._hybrid(step.args)
+        elif tool in {"dense_search", "dense_node.search"}:
+            hits = self._dense_search(step.args, tool_name=tool)
+        elif tool in {"sparse_search", "bm25_node.search"}:
+            hits = self._sparse_search(step.args, tool_name=tool)
+        elif tool in {"hybrid_search"}:
+            hits = self._hybrid(step.args, tool_name=tool)
+        elif tool == "table_index.search":
+            hits = self._table_index_search(step.args)
+        elif tool == "chart_index.search":
+            hits = self._chart_index_search(step.args)
         else:
             raise ValueError(f"Unknown retrieval tool: {tool}")
 
@@ -199,8 +232,27 @@ class RetrieverManager:
         ]
 
     def _jump_to_page(self, args: Dict[str, object]) -> List[RetrievalHit]:
-        page = int(args.get("page", -1))
+        try:
+            page = int(args.get("page", -1))
+        except (TypeError, ValueError):
+            page = -1
         node_ids = self.resources.page_index.get(page, [])
+        if not node_ids:
+            # fallback：找到离目标页最近的键
+            candidates = sorted(self.resources.page_index.keys())
+            closest = None
+            min_gap = None
+            for key in candidates:
+                if not isinstance(key, int):
+                    continue
+                gap = abs(key - page)
+                if min_gap is None or gap < min_gap:
+                    min_gap = gap
+                    closest = key
+            if closest is not None:
+                node_ids = self.resources.page_index.get(closest, [])
+        if not node_ids:
+            return []
         hits: List[RetrievalHit] = []
         for idx, nid in enumerate(node_ids):
             hits.append(
@@ -213,7 +265,7 @@ class RetrieverManager:
             )
         return hits
 
-    def _dense_search(self, args: Dict[str, object]) -> List[RetrievalHit]:
+    def _dense_search(self, args: Dict[str, object], *, tool_name: str = "dense_search") -> List[RetrievalHit]:
         view = str(args.get("view") or "")
         variant = _normalize_variant(view)
         corpus = self.resources.text_index
@@ -223,17 +275,17 @@ class RetrieverManager:
             base_map = self.resources.dense_base_ids.get(variant, {})
         candidates = self._prepare_dense_candidates(corpus, base_map, variant)
         queries = self._collect_queries(args)
-        return self._aggregate_rank(tool="dense_search", queries=queries, candidates=candidates)
+        return self._aggregate_rank(tool=tool_name, queries=queries, candidates=candidates)
 
-    def _sparse_search(self, args: Dict[str, object]) -> List[RetrievalHit]:
+    def _sparse_search(self, args: Dict[str, object], *, tool_name: str = "sparse_search") -> List[RetrievalHit]:
         if self.resources.sparse_docs:
             candidates = self._prepare_sparse_candidates(self.resources.sparse_docs)
         else:
             candidates = self._prepare_dense_candidates(self.resources.text_index, {}, None)
         queries = self._collect_queries(args)
-        return self._aggregate_rank(tool="sparse_search", queries=queries, candidates=candidates)
+        return self._aggregate_rank(tool=tool_name, queries=queries, candidates=candidates)
 
-    def _hybrid(self, args: Dict[str, object]) -> List[RetrievalHit]:
+    def _hybrid(self, args: Dict[str, object], *, tool_name: str = "hybrid_search") -> List[RetrievalHit]:
         dense_variant = _normalize_variant(str(args.get("view") or ""))
         dense_corpus = self.resources.text_index
         dense_base: Dict[str, str] = {}
@@ -248,7 +300,88 @@ class RetrieverManager:
         )
         combined = dense_candidates + sparse_candidates
         queries = self._collect_queries(args)
-        return self._aggregate_rank(tool="hybrid_search", queries=queries, candidates=combined)
+        return self._aggregate_rank(tool=tool_name, queries=queries, candidates=combined)
+
+    def _table_index_search(self, args: Dict[str, object]) -> List[RetrievalHit]:
+        query = self._clean_str_arg(args.get("query"))
+        column_hints = self._clean_str_list(args.get("column_hints"))
+        keywords = self._clean_str_list(args.get("keywords"))
+        filters = args.get("filters") if isinstance(args.get("filters"), dict) else {}
+
+        queries: List[str] = []
+        if query:
+            queries.append(query)
+        for hint in column_hints:
+            if hint not in queries:
+                queries.append(hint)
+        for kw in keywords:
+            if kw not in queries:
+                queries.append(kw)
+
+        dense_args = {
+            "query": queries[0] if queries else query,
+            "queries": queries[1:] if len(queries) > 1 else None,
+            "view": "table",
+        }
+        dense_args = {k: v for k, v in dense_args.items() if v}
+        raw_hits = self._dense_search(dense_args, tool_name="table_index.search")
+
+        annotated: List[RetrievalHit] = []
+        for hit in raw_hits:
+            metadata = dict(hit.metadata)
+            if column_hints:
+                metadata["column_hints"] = column_hints
+            if filters:
+                metadata["filters"] = filters
+            annotated.append(
+                RetrievalHit(
+                    node_id=hit.node_id,
+                    score=hit.score,
+                    tool="table_index.search",
+                    metadata=metadata,
+                )
+            )
+        return annotated
+
+    def _chart_index_search(self, args: Dict[str, object]) -> List[RetrievalHit]:
+        query = self._clean_str_arg(args.get("query"))
+        keywords = self._clean_str_list(args.get("keywords"))
+        units = self._clean_str_list(args.get("units"))
+        years = [str(item).strip() for item in args.get("years") or [] if str(item).strip()]
+
+        queries: List[str] = []
+        if query:
+            queries.append(query)
+        for item in keywords + units + years:
+            if item not in queries:
+                queries.append(item)
+
+        dense_args = {
+            "query": queries[0] if queries else query,
+            "queries": queries[1:] if len(queries) > 1 else None,
+            "view": "image",
+        }
+        dense_args = {k: v for k, v in dense_args.items() if v}
+        raw_hits = self._dense_search(dense_args, tool_name="chart_index.search")
+
+        annotated: List[RetrievalHit] = []
+        for hit in raw_hits:
+            metadata = dict(hit.metadata)
+            if keywords:
+                metadata["keywords"] = keywords
+            if units:
+                metadata["units"] = units
+            if years:
+                metadata["years"] = years
+            annotated.append(
+                RetrievalHit(
+                    node_id=hit.node_id,
+                    score=hit.score,
+                    tool="chart_index.search",
+                    metadata=metadata,
+                )
+            )
+        return annotated
 
     def _collect_queries(self, args: Dict[str, object]) -> List[str]:
         queries: List[str] = []
@@ -284,6 +417,22 @@ class RetrieverManager:
                 _append(kw)
 
         return queries
+
+    def _clean_str_arg(self, value) -> Optional[str]:
+        if isinstance(value, str):
+            cleaned = " ".join(value.strip().split())
+            return cleaned or None
+        return None
+
+    def _clean_str_list(self, value) -> List[str]:
+        items: List[str] = []
+        if isinstance(value, list):
+            for element in value:
+                if isinstance(element, str):
+                    cleaned = " ".join(element.strip().split())
+                    if cleaned:
+                        items.append(cleaned)
+        return items
 
     def _aggregate_rank(
         self,

@@ -15,6 +15,7 @@ from .schemas import ReasonerAnswer, StrategyPlan
 from .retriever import RetrieverLLMCallable, RetrieverManager
 from .router import QuestionRouter, RouterLLMCallable
 from .strategy_planner import RetrievalStrategyPlanner, StrategyLLMCallable
+from .toolhub import ToolExecutor, build_default_registry
 
 
 def run_question(
@@ -43,13 +44,18 @@ def run_question(
         llm_callable=llm_callable,
     )
 
+    retriever_manager = RetrieverManager(resources, llm_callable=retriever_llm_callable)
+    tool_registry = build_default_registry()
+    tool_executor = ToolExecutor(tool_registry)
+
     orchestrator = AgentOrchestrator(
         router=QuestionRouter(llm_callable=router_llm_callable),
         strategy_planner=RetrievalStrategyPlanner(llm_callable=strategy_llm_callable),
         planner=Planner(graph=graph),
-        retriever_manager=RetrieverManager(resources, llm_callable=retriever_llm_callable),
+        retriever_manager=retriever_manager,
         observer=Observer(store=store, image_analyzer=image_analyzer),
         reasoner=reasoner,
+        tool_executor=tool_executor,
         config=AgentConfig(max_iterations=max_iterations),
     )
 

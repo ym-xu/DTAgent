@@ -23,6 +23,7 @@ from .schemas import (
     RetrievalHit,
 )
 from .toolhub import ToolCall, ToolExecutor, ToolResult
+from .judger import LLMJudger
 
 
 class MissingDependencyError(RuntimeError):
@@ -47,6 +48,7 @@ class StageOutcome:
     quality: float = 0.0
     judger_pass: bool = False
     metrics: Dict[str, float] = field(default_factory=dict)
+    verdict: Dict[str, object] = field(default_factory=dict)
 
 
 class AgentOrchestrator:
@@ -61,6 +63,7 @@ class AgentOrchestrator:
         retriever_manager,
         observer,
         reasoner,
+        llm_judger: Optional[LLMJudger] = None,
         tool_executor: Optional[ToolExecutor] = None,
         config: Optional[AgentConfig] = None,
     ) -> None:
@@ -72,6 +75,7 @@ class AgentOrchestrator:
         self.retriever_manager = retriever_manager
         self.observer = observer
         self.reasoner = reasoner
+        self.llm_judger = llm_judger
         self.tool_executor = tool_executor
         self.last_answer: Optional[ReasonerAnswer] = None
 
@@ -197,9 +201,43 @@ class AgentOrchestrator:
                 outcomes.append(outcome)
                 break
 
-            judger_pass = self._heuristic_judger(answer)
+            verdict = self._judger_verify(answer, plan, stage)
+            outcome.verdict = verdict or {}
+
+            if verdict and not verdict.get("pass", False):
+                recommendation = verdict.get("recommendation", {})
+                issues = verdict.get("issues", [])
+                if recommendation.get("action") == "return_unanswerable":
+                    detail_lines: List[str] = []
+                    if "threshold_fail" in issues and verdict.get("details", {}).get("inequality"):
+                        mismatch = verdict["details"]["inequality"]
+                        detail_lines.append(
+                            "No supporting value satisfies the required threshold "
+                            f"({mismatch.get('value')} vs {mismatch.get('comparator')} {mismatch.get('threshold')})"
+                        )
+                    if "format_mismatch" in issues:
+                        detail_lines.append("Answer format does not match expected output type")
+                    if "unit_mismatch" in issues:
+                        detail_lines.append("Units in answer/evidence differ from requested units")
+                    explanation = verdict.get("explanation")
+                    if explanation:
+                        detail_lines.append(f"Judger explanation: {explanation}")
+                    if not detail_lines:
+                        detail_lines.append("Judger issues: " + ", ".join(issues))
+                    outcome.answer = ReasonerAnswer(
+                        answer="Insufficient information to satisfy the query constraints",
+                        confidence=0.0,
+                        support_nodes=answer.support_nodes,
+                        reasoning_trace=detail_lines,
+                    )
+                elif recommendation.get("action") in {"replan", "redo_answer"}:
+                    need_replan = True
+                    outcomes.append(outcome)
+                    break
+
+            judger_pass = verdict.get("pass", False) if verdict else self._heuristic_judger(outcome.answer)
             outcome.judger_pass = judger_pass
-            metrics = self._compute_quality_metrics(plan, stage, hits, answer)
+            metrics = self._compute_quality_metrics(plan, stage, hits, outcome.answer, verdict)
             outcome.metrics = metrics
             outcome.quality = self._compute_quality_score(metrics, judger_pass)
             outcomes.append(outcome)
@@ -271,6 +309,8 @@ class AgentOrchestrator:
                 hits.extend(extracted)
             if tool_id == "vlm.answer":
                 self._record_vlm_observation(tool_id, step, call_args, result)
+            if tool_id == "judger.verify":
+                context["judger.verdict"] = result.data or {}
 
         if all_error:
             return None
@@ -325,9 +365,14 @@ class AgentOrchestrator:
         stage: StrategyStage,
         hits: Sequence[RetrievalHit],
         answer: ReasonerAnswer,
+        verdict: Optional[Dict[str, object]] = None,
     ) -> Dict[str, float]:
         coverage = self._estimate_coverage(hits, stage, answer)
-        format_ok = self._format_score(plan.final, answer.answer if answer else "")
+        format_ok = self._format_score(
+            plan.final,
+            answer.answer if answer else "",
+            verdict.get("scores", {}).get("format") if verdict else None,
+        )
         source_priority = self._source_priority(answer.support_nodes if answer else [])
         model_conf = self._clamp(answer.confidence if answer else 0.0)
         return {
@@ -361,7 +406,14 @@ class AgentOrchestrator:
         target = target if target > 0 else 50
         return min(1.0, len(unique_nodes) / max(1, target))
 
-    def _format_score(self, final_spec: Optional[FinalSpec], answer_text: str) -> float:
+    def _format_score(
+        self,
+        final_spec: Optional[FinalSpec],
+        answer_text: str,
+        override: Optional[object] = None,
+    ) -> float:
+        if isinstance(override, bool):
+            return 1.0 if override else 0.0
         if not answer_text.strip():
             return 0.0
         if not final_spec or not final_spec.format:
@@ -414,6 +466,100 @@ class AgentOrchestrator:
             return False
         has_support = bool(answer.support_nodes)
         return has_support and self._clamp(answer.confidence) >= 0.4
+
+    def _judger_verify(
+        self,
+        answer: ReasonerAnswer,
+        plan: StrategyPlan,
+        stage: StrategyStage,
+    ) -> Optional[Dict[str, object]]:
+        if not answer:
+            return None
+        if not self.memory.router_history:
+            return None
+        decision = self.memory.router_history[-1]
+        if not self.llm_judger:
+            return None
+        return self.llm_judger.verify(
+            question=decision.query,
+            answer=answer,
+            observations=self.memory.observations,
+            signals=decision.signals,
+            constraints=decision.constraints,
+        )
+
+    @staticmethod
+    def _merge_verdicts(
+        rule_verdict: Dict[str, object],
+        llm_verdict: Dict[str, object],
+    ) -> Dict[str, object]:
+        if not llm_verdict:
+            return rule_verdict
+
+        fatal_issues = {"unit_mismatch", "threshold_fail", "no_support"}
+        rule_pass = bool(rule_verdict.get("pass", False))
+        llm_pass = bool(llm_verdict.get("pass", False))
+        rule_issues = rule_verdict.get("issues", []) or []
+        has_fatal = any(issue in fatal_issues for issue in rule_issues)
+        combined_pass = llm_pass and not has_fatal
+
+        combined_scores: Dict[str, float] = {}
+        for source in (rule_verdict, llm_verdict):
+            scores = source.get("scores")
+            if isinstance(scores, dict):
+                for key, value in scores.items():
+                    try:
+                        combined_scores[key] = float(value) if isinstance(value, (int, float)) else value
+                    except (TypeError, ValueError):
+                        combined_scores[key] = value
+
+        issues: List[str] = []
+        for source in (rule_verdict, llm_verdict):
+            for issue in source.get("issues", []) or []:
+                if issue not in issues:
+                    issues.append(issue)
+
+        recommendation = AgentOrchestrator._select_recommendation(
+            combined_pass,
+            rule_verdict.get("recommendation"),
+            llm_verdict.get("recommendation"),
+        )
+
+        details: Dict[str, object] = {}
+        for source in (rule_verdict, llm_verdict):
+            detail = source.get("details")
+            if isinstance(detail, dict):
+                details.update(detail)
+
+        explanation = llm_verdict.get("details", {}).get("llm_explanation") if isinstance(llm_verdict.get("details"), dict) else None
+        if not explanation:
+            explanation = llm_verdict.get("explanation")
+
+        final = {
+            "pass": combined_pass,
+            "scores": combined_scores,
+            "issues": issues,
+            "recommendation": {"action": recommendation},
+            "details": details,
+            "explanation": explanation,
+        }
+        return final
+
+    @staticmethod
+    def _select_recommendation(
+        passed: bool,
+        *recommendations,
+    ) -> str:
+        if passed:
+            return "accept"
+        priority = ["return_unanswerable", "redo_answer", "replan"]
+        for action in priority:
+            for rec in recommendations:
+                if isinstance(rec, dict) and rec.get("action") == action:
+                    return action
+                if isinstance(rec, str) and rec == action:
+                    return action
+        return "replan"
 
     @staticmethod
     def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
@@ -630,17 +776,20 @@ class AgentOrchestrator:
         result: ToolResult,
     ) -> None:
         data = result.data if isinstance(result.data, dict) else {}
+        answer_text = data.get("answer")
         payload = {
             "question": call_args.get("question"),
             "images": call_args.get("images"),
             "vision": {
                 "tool": tool_id,
-                "answer": data.get("answer"),
+                "answer": answer_text,
                 "thinking": data.get("thinking"),
                 "confidence": data.get("confidence"),
                 "details": data.get("details"),
             },
         }
+        if isinstance(answer_text, str) and answer_text.strip():
+            payload["text"] = answer_text.strip()
         node_id = f"vlm.answer:{step.step_id or 'default'}"
 
         obs = Observation(node_id=node_id, modality="image", payload=payload)

@@ -13,6 +13,7 @@ from .adapters import (
     page_locator,
     table_index,
     vlm_answer,
+    judger_verify,
 )
 
 
@@ -29,6 +30,7 @@ def build_default_registry() -> ToolRegistry:
     registry.register("extract.chart_read_axis", extract.chart_read_axis)
     registry.register("compute.filter", compute.filter)
     registry.register("vlm.answer", vlm_answer.answer)
+    registry.register("judger.verify", judger_verify.verify)
     return registry
 
 

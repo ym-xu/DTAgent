@@ -9,6 +9,7 @@ QuestionRouter
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Protocol, Tuple
 
@@ -18,6 +19,8 @@ from .schemas import (
     RouterRisk,
     RouterSignals,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class RouterLLMCallable(Protocol):
@@ -207,8 +210,8 @@ class QuestionRouter:
 
         decision = normalize_router_decision(decision)
 
-        print(
-            "[Router Decision]",
+        logger.info(
+            "[Router Decision] %s",
             json.dumps(
                 {
                     "query": decision.query,

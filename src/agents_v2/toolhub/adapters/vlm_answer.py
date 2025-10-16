@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -14,6 +15,8 @@ try:
 except ImportError:  # pragma: no cover
     gpt_llm_call = qwen_llm_call = None
 
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a vision assistant. Answer the user's question strictly based on the supplied image(s). "
@@ -74,7 +77,7 @@ def answer(call: ToolCall) -> ToolResult:
         if roi_context:
             payload["context"] = f"{payload.get('context', '')}\n{roi_context}".strip()
         raw = _call_vlm(system_prompt, payload, backend, model, [data_url])
-        print("raw: ",raw)
+        logger.debug("VLM raw response: %s", raw)
         if not raw:
             details.append(
                 {

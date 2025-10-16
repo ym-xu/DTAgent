@@ -9,12 +9,15 @@ RetrieverManager
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Sequence, Tuple
 
 from ..memory import AgentMemory
 from ..schemas import RetrievalHit, StrategyStep
+
+logger = logging.getLogger(__name__)
 
 
 class RetrieverLLMCallable(Protocol):
@@ -537,9 +540,9 @@ class RetrieverManager:
                     metadata={"source_node": detail_id},
                 )
             )
-        print("retriever raw:", raw)
+        logger.debug("Retriever raw response: %s", raw)
         if thinking:
-            print(f"[Retriever Thinking] {thinking}")
+            logger.debug("Retriever thinking: %s", thinking)
         return hits
 
     @staticmethod

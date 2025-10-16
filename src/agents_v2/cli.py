@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -55,6 +56,7 @@ def run_question(
         retriever_manager=retriever_manager,
         observer=Observer(store=store, image_analyzer=image_analyzer),
         reasoner=reasoner,
+        llm_judger=None,
         tool_executor=tool_executor,
         config=AgentConfig(max_iterations=max_iterations),
     )
@@ -148,6 +150,12 @@ def main() -> None:
         image_root = Path(args.doc_dir)
         image_analyzer = build_llm_image_analyzer(backend=backend, model=model, image_root=image_root)
 
+    logging.basicConfig(level=logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+    print(f"Question: {args.question}")
+
     answer, orchestrator, plans = run_question(
         args.doc_dir,
         args.question,
@@ -158,9 +166,10 @@ def main() -> None:
         image_analyzer=image_analyzer,
     )
 
-    print(f"Question: {args.question}")
-    print("\nRouter Decision:")
-    print(_format_router_history(orchestrator))
+    if not orchestrator.memory.router_history:
+        print("\nRouter Decision:")
+        print(_format_router_history(orchestrator))
+
     if not plans:
         print("\nStrategy Plan:")
         for plan in orchestrator.memory.strategy_history:

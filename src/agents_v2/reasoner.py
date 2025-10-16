@@ -8,10 +8,13 @@ Reasoner
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from typing import Callable, Dict, Iterable, List, Optional, Protocol
 
 from .schemas import Observation, ReasonerAnswer
+
+logger = logging.getLogger(__name__)
 
 
 class LLMCallable(Protocol):
@@ -98,7 +101,7 @@ class Reasoner:
             raise RuntimeError("Reasoner requires use_llm=True; heuristic fallback is disabled")
 
         llm_answer = self._run_llm(question, selected_obs)
-        print("llm_answer :", llm_answer)
+        logger.debug("Reasoner LLM parsed answer: %s", llm_answer)
         if llm_answer:
             return llm_answer
         
@@ -161,10 +164,12 @@ class Reasoner:
         context = json.dumps(context_blocks, ensure_ascii=False)
         try:
             raw = llm_call(question=question, context=context, config=self.llm_config)
+            logger.debug("Reasoner LLM input preview: %s", context[:600])
+            logger.debug("Reasoner LLM output preview: %s", (raw or "")[:600])
             print(f"[Reasoner LLM Input] {context[:600]}...")
             print(f"[Reasoner LLM Output] {raw[:600]}...")
         except Exception as exc:
-            print(f"[Reasoner LLM Error] {exc}")
+            logger.exception("Reasoner LLM invocation failed")
             return None
         if not raw:
             return None
@@ -184,7 +189,7 @@ class Reasoner:
         if not answer:
             return None
         if thinking:
-            print(f"[Reasoner Thinking] {thinking}")
+            logger.debug("Reasoner LLM thinking: %s", thinking)
         final_conf = confidence if confidence > 0 else self.min_confidence
         return ReasonerAnswer(
             answer=answer,

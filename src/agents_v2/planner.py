@@ -302,7 +302,7 @@ def _features_for(signals) -> List[str]:
         feats.append("unit")
         if signals.page_hint:
             feats.append("page")
-        return feats
+    return feats
 
 
 def _build_steps_from_router(

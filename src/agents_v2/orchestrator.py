@@ -58,11 +58,11 @@ class AgentOrchestrator:
         self,
         *,
         router,
-        strategy_planner,
         planner,
         retriever_manager,
         observer,
         reasoner,
+        strategy_planner=None,
         llm_judger: Optional[LLMJudger] = None,
         tool_executor: Optional[ToolExecutor] = None,
         config: Optional[AgentConfig] = None,
@@ -259,7 +259,10 @@ class AgentOrchestrator:
         if not plan.is_empty():
             self.memory.push_strategy(plan)
             return plan
-        return self.decide_strategy(question)
+        if self.strategy_planner:
+            return self.decide_strategy(question)
+        self.memory.push_strategy(plan)
+        return plan
 
     def _execute_plan(self, plan: StrategyPlan):
         if not self.planner or not self.retriever_manager:

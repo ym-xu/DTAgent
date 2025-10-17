@@ -15,8 +15,13 @@ from .reasoner import LLMCallable, Reasoner, ReasonerLLMConfig
 from .schemas import ReasonerAnswer, StrategyPlan
 from .retriever import RetrieverLLMCallable, RetrieverManager
 from .router import QuestionRouter, RouterLLMCallable
-from .strategy_planner import RetrievalStrategyPlanner, StrategyLLMCallable
+from .strategy_planner import StrategyLLMCallable
 from .toolhub import ToolExecutor, build_default_registry
+
+DEFAULT_LLM_BACKEND = "gpt"
+DEFAULT_LLM_MODEL = "gpt-4o-mini"
+DEFAULT_IMAGE_BACKEND = "gpt"
+DEFAULT_IMAGE_MODEL = "gpt-4o"
 
 
 def run_question(
@@ -24,9 +29,6 @@ def run_question(
     question: str,
     *,
     max_iterations: int = 3,
-    use_llm: bool = True,
-    llm_backend: str = "gpt",
-    llm_model: str = "gpt-4o-mini",
     llm_callable: Optional[LLMCallable] = None,
     image_analyzer=None,
     strategy_llm_callable: Optional[StrategyLLMCallable] = None,
@@ -40,25 +42,32 @@ def run_question(
     store = build_observer_store(base)
 
     reasoner = Reasoner(
-        use_llm=use_llm,
-        llm_config=ReasonerLLMConfig(backend=llm_backend, model=llm_model),
+        use_llm=True,
+        llm_config=ReasonerLLMConfig(backend=DEFAULT_LLM_BACKEND, model=DEFAULT_LLM_MODEL),
         llm_callable=llm_callable,
+    )
+
+    effective_image_analyzer = image_analyzer or build_llm_image_analyzer(
+        backend=DEFAULT_IMAGE_BACKEND, model=DEFAULT_IMAGE_MODEL, image_root=base
     )
 
     retriever_manager = RetrieverManager(resources, llm_callable=retriever_llm_callable)
     tool_registry = build_default_registry()
     tool_executor = ToolExecutor(tool_registry)
+    router = QuestionRouter(llm_callable=router_llm_callable)
+    planner = Planner(graph=graph)
+    observer = Observer(store=store, image_analyzer=effective_image_analyzer)
+    config = AgentConfig(max_iterations=max_iterations)
 
     orchestrator = AgentOrchestrator(
-        router=QuestionRouter(llm_callable=router_llm_callable),
-        strategy_planner=RetrievalStrategyPlanner(llm_callable=strategy_llm_callable),
-        planner=Planner(graph=graph),
+        router=router,
+        planner=planner,
         retriever_manager=retriever_manager,
-        observer=Observer(store=store, image_analyzer=image_analyzer),
+        observer=observer,
         reasoner=reasoner,
         llm_judger=None,
         tool_executor=tool_executor,
-        config=AgentConfig(max_iterations=max_iterations),
+        config=config,
     )
 
     plans_emitted: List[StrategyPlan] = []
@@ -136,19 +145,7 @@ def main() -> None:
     parser.add_argument("--doc-dir", required=True, help="Path to document index directory")
     parser.add_argument("--question", required=True, help="Question to ask")
     parser.add_argument("--max-iterations", type=int, default=3, help="Maximum planner-reasoner iterations")
-    parser.add_argument("--llm-backend", default="gpt", help="LLM backend identifier (gpt/qwen)")
-    parser.add_argument("--llm-model", default="gpt-4o-mini", help="LLM model name")
-    parser.add_argument("--use-image-llm", action="store_true", help="Enable LLM-based image summarization")
-    parser.add_argument("--image-llm-backend", default=None, help="Image analyzer backend (defaults to --llm-backend)")
-    parser.add_argument("--image-llm-model", default=None, help="Image analyzer model (defaults to --llm-model)")
     args = parser.parse_args()
-
-    image_analyzer = None
-    if args.use_image_llm:
-        backend = args.image_llm_backend or args.llm_backend
-        model = args.image_llm_model or args.llm_model
-        image_root = Path(args.doc_dir)
-        image_analyzer = build_llm_image_analyzer(backend=backend, model=model, image_root=image_root)
 
     logging.basicConfig(level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -160,26 +157,22 @@ def main() -> None:
         args.doc_dir,
         args.question,
         max_iterations=args.max_iterations,
-        use_llm=True,
-        llm_backend=args.llm_backend,
-        llm_model=args.llm_model,
-        image_analyzer=image_analyzer,
     )
 
-    if not orchestrator.memory.router_history:
-        print("\nRouter Decision:")
-        print(_format_router_history(orchestrator))
+    # if not orchestrator.memory.router_history:
+    #     print("\nRouter Decision:")
+    #     print(_format_router_history(orchestrator))
 
-    if not plans:
-        print("\nStrategy Plan:")
-        for plan in orchestrator.memory.strategy_history:
-            print(_format_strategy(plan))
+    # if not plans:
+    #     print("\nStrategy Plan:")
+    #     for plan in orchestrator.memory.strategy_history:
+    #         print(_format_strategy(plan))
 
-    print("\nRetriever Hits:")
-    print(_format_hits(orchestrator))
+    # print("\nRetriever Hits:")
+    # print(_format_hits(orchestrator))
 
-    print("\nObservations:")
-    print(_format_observations(orchestrator))
+    # print("\nObservations:")
+    # print(_format_observations(orchestrator))
 
     print("\nFinal Answer:")
     if answer.thinking:

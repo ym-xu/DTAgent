@@ -132,14 +132,15 @@ The agent operates through an **iterative navigation–observation–reasoning l
 - `src/agents_v2/observer.py`：根据节点类型封装证据；支持注入 LLM 图像分析器（基于 caption 描述）。
 - `src/agents_v2/reasoner.py`：过滤证据 → 构造 LLM prompt（包含表格结构、图像描述）→ 解析回答；无启发式兜底。
 - `src/agents_v2/orchestrator.py`：协调整个循环，处理 `REPLAN`。
-- `src/agents_v2/cli.py`：单文档调试入口，可查看策略、命中、观测和最终回答。
+- `src/agents_v2/cli.py`：单文档调试入口，默认启用内置 GPT4o-mini + GPT4o 图像链路，可查看策略、命中、观测和最终回答。
 
 **✅ 已完成**
 - 基础模块与数据结构全部落地，并有单元测试覆盖策略、检索、观察、推理及 CLI。
 - Loader 会从 `summary.json`/`dense_coarse.jsonl`/`graph_edges.jsonl` 读取索引，拼出 `DocGraphNavigator` 与 `RetrieverResources`，并区分逻辑页/物理页索引供视觉链路使用。
 - Planner 已对接新版 ToolHub：表格问题自动生成 `table_index.search → extract.column → compute.filter`，图表问题走 `chart_index.search → extract.chart_read_axis`，视觉问题采用 `page_locator.locate → figure_finder.find_regions → vlm.answer` 三段式。
 - Router 会输出 query_type 候选列表；Planner 依据候选自动构造多阶段策略并根据覆盖度/置信度门控是否执行后续阶段。
-- CLI 支持 `--llm-backend/--llm-model/--use-image-llm`，可注入自定义 LLM/VLM callable。
+- Orchestrator 现在默认仅通过 Router → Planner 生成检索计划，旧版 `RetrievalStrategyPlanner` 不再作为主路径；若 Router 生成空计划也会回落到规则计划而非旧 LLM。
+- CLI 改为写死默认 LLM/VLM，无需再传入模型参数；仍保留可通过注入 callable 覆盖的测试钩子。
 - Reasoner 强制走 LLM 流程；若 LLM 返回空结果，则请求 `REPLAN`，并结合 Judger 得分纳入阶段质量函数。
 
 **⏳ 未完成 / 待补充**

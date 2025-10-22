@@ -23,7 +23,7 @@ class PlannerTests(unittest.TestCase):
             },
         )
         self.memory = AgentMemory()
-        self.planner = Planner(graph=graph, max_observation_neighbors=4)
+        self.planner = Planner(graph=graph, observation_limit=4)
 
     def test_plan_from_strategy_converts_steps(self) -> None:
         plan = StrategyPlan(
@@ -67,4 +67,3 @@ class PlannerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

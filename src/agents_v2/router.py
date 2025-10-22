@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Protocol, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
 from .schemas import (
     RouterConstraints,
@@ -24,7 +24,13 @@ logger = logging.getLogger(__name__)
 
 
 class RouterLLMCallable(Protocol):
-    def __call__(self, *, question: str, config: "RouterLLMConfig") -> str: ...
+    def __call__(
+        self,
+        *,
+        question: str,
+        config: "RouterLLMConfig",
+        toc_outline: Optional[str] = None,
+    ) -> str: ...
 
 
 @dataclass
@@ -103,7 +109,9 @@ Return ONLY JSON following this schema exactly (include up to 3 candidate query 
     "expected_format": "int|float|string|list",
     "section_cues": [string, ...],
     "keywords": [string, ...],
-    "objects_scope": "figure|page|all_figures_on_page"
+    "objects_scope": "figure|page|all_figures_on_page",
+    "evidence_hint": "text|layout|table|graphics|unknown",
+    "mentions": [string, ...]
   },
   "candidates": [
     {"query_type": "table", "score": 0.8},
@@ -138,17 +146,28 @@ Rules:
   * If risk.need_visual=true and signals.objects is non-empty, prefer a visual_* query type over textual ones.
   * signals.objects_scope is ONLY for visual tasks; keep it null otherwise.
   * If the question specifies inequalities (\"more than\", \"at least\", etc.), include \"filter\" in operations, set comparator to the mathematical symbol (\">\", \">=\", \"<\", \"<=\", \"==\", \"!=\"), and threshold to the numeric value. Add \"lookup\" alongside \"filter\" when the task is to identify which entity satisfies the condition.
-- Few-shot expectations:
-  * Question: \"From 2003 to 2007, what share (%) of the Bronx’s total land area was rezoned?\" → query_type=\"table\", units=[\"%\"], years=[2003,2004,2005,2006,2007], risk.need_table=true, risk.need_chart=true (fallback).
-  * Question: \"Count how many research questions this paper addresses.\" → query_type=\"text\", operations=[\"count\"], expected_format=\"int\".
-  * Question: \"On page 2, count the cars shown in the figures; on page 4, count the bars; what is the total when you add them together?\" → query_type=\"visual_count\", page_hint=[2,4], objects=[\"car\",\"bar\"], operations=[\"sum\"], risk.need_visual=true.
+- Evidence hints:
+  * \"text\" → narrative paragraphs、正文陈述；
+  * \"layout\" → 标题、题注、页眉页脚等结构化文本；
+  * \"table\" → 结构化表格；
+  * \"graphics\" → 图像、图表、地图等视觉元素（后续会再判是否属于 chart）；
+  * 使用 \"unknown\" 如果无法判断。`mentions` 用于列举问题中的线索（如 “Table 3”, “caption”, “in the text”）。
 """
 
 
-def _default_router_llm_callable(*, question: str, config: RouterLLMConfig) -> str:
+def _default_router_llm_callable(
+    *,
+    question: str,
+    config: RouterLLMConfig,
+    toc_outline: Optional[str] = None,
+) -> str:
     from src.utils.llm_clients import gpt_llm_call, qwen_llm_call  # type: ignore
 
-    payload = json.dumps({"question": question}, ensure_ascii=False)
+    payload_data = {"question": question}
+    print("toc_outline: ",toc_outline)
+    if toc_outline:
+        payload_data["toc_outline"] = toc_outline
+    payload = json.dumps(payload_data, ensure_ascii=False)
     messages = [
         {"role": "system", "content": ROUTER_PROMPT},
         {"role": "user", "content": payload},
@@ -166,6 +185,16 @@ class QuestionRouter:
 
     llm_config: RouterLLMConfig = field(default_factory=RouterLLMConfig)
     llm_callable: Optional[RouterLLMCallable] = None
+    toc_context: Optional[str] = None
+
+    def attach_toc(self, toc_summary: "str | Iterable[str]") -> None:
+        """缓存 TOC 框架，后续可嵌入 Router 提示。"""
+        if isinstance(toc_summary, str):
+            snippet = toc_summary
+        else:
+            snippet = "\n".join(str(line) for line in toc_summary)
+        snippet = snippet.strip()
+        self.toc_context = snippet if snippet else None
 
     def route(self, question: str) -> RouterDecision:
         normalized = question.strip()
@@ -173,7 +202,13 @@ class QuestionRouter:
             raise ValueError("Question must be non-empty for routing")
 
         llm_call = self.llm_callable or _default_router_llm_callable
-        raw = llm_call(question=normalized, config=self.llm_config)
+        if llm_call is _default_router_llm_callable:
+            raw = llm_call(question=normalized, config=self.llm_config, toc_outline=self.toc_context)
+        else:
+            try:
+                raw = llm_call(question=normalized, config=self.llm_config, toc_outline=self.toc_context)
+            except TypeError:
+                raw = llm_call(question=normalized, config=self.llm_config)
         if not raw:
             raise RuntimeError("Router LLM returned empty response")
 
@@ -207,8 +242,6 @@ class QuestionRouter:
             raw=data,
             candidates=candidates,
         )
-
-        decision = normalize_router_decision(decision)
 
         logger.info(
             "[Router Decision] %s",
@@ -298,6 +331,14 @@ class QuestionRouter:
         else:
             objects_scope = objects_scope.strip()
 
+        evidence_hint = payload.get("evidence_hint")
+        if isinstance(evidence_hint, str):
+            evidence_hint = evidence_hint.strip().lower() or None
+        else:
+            evidence_hint = None
+
+        mentions = _as_str_list("mentions")
+
         return RouterSignals(
             page_hint=_as_int_list("page_hint"),
             figure_hint=_as_str_list("figure_hint"),
@@ -312,6 +353,8 @@ class QuestionRouter:
             objects_scope=objects_scope,
             threshold=_parse_threshold_value(payload.get("threshold")),
             comparator=_parse_comparator_value(payload.get("comparator")),
+            evidence_hint=evidence_hint,
+            mentions=mentions,
         )
 
     def _parse_risk(self, payload) -> RouterRisk:
@@ -375,83 +418,4 @@ class QuestionRouter:
         except (TypeError, ValueError):
             return 0.0
         return max(0.0, min(1.0, confidence))
-
-
-def normalize_router_decision(decision: RouterDecision) -> RouterDecision:
-    """Post-process router decision to keep query_type within supported set."""
-
-    signals = decision.signals
-    risk = decision.risk
-    query_type = decision.query_type.strip().lower() if decision.query_type else "text"
-
-    ops: List[str] = []
-    seen_ops: set[str] = set()
-    for raw_op in signals.operations or []:
-        if not isinstance(raw_op, str):
-            continue
-        lowered = raw_op.strip().lower()
-        if lowered and lowered not in seen_ops:
-            seen_ops.add(lowered)
-            ops.append(lowered)
-    keywords = [kw.lower() for kw in (signals.keywords or [])]
-    units = [unit.lower() for unit in (signals.units or [])]
-    objects = [obj.strip() for obj in (signals.objects or []) if obj.strip()]
-
-    textual_percentage = any(unit in {"%", "percent", "percentage"} for unit in units)
-    mentions_table = any("table" in kw for kw in keywords)
-    mentions_figure = any(kw in {"figure", "chart", "graph", "trend", "legend"} for kw in keywords)
-
-    need_visual = bool(risk.need_visual or objects)
-    need_table = bool(risk.need_table or textual_percentage or mentions_table)
-
-    comparator = (signals.comparator or "").strip() if signals.comparator else None
-    if comparator == "=":
-        comparator = "=="
-    threshold_value = signals.threshold
-    if comparator and threshold_value is not None:
-        for auto_op in ("filter", "lookup"):
-            if auto_op not in seen_ops:
-                ops.append(auto_op)
-                seen_ops.add(auto_op)
-
-    # Preference rules
-    if need_visual:
-        if any(op in {"count", "sum"} for op in ops) or signals.page_hint:
-            query_type = "visual_count"
-        elif query_type not in VISUAL_QUERY_TYPES:
-            query_type = "visual_presence"
-    else:
-        if query_type in {"visual_count", "visual_presence", "visual_compare", "visual_trend"}:
-            query_type = "text"
-
-    if query_type in VISUAL_QUERY_TYPES and need_table and not need_visual:
-        query_type = "table"
-    if query_type == "table" and need_visual and not objects:
-        need_visual = False
-        risk = replace(risk, need_visual=False)
-
-    if query_type in {"numeric_compute", "text"} and need_table:
-        query_type = "table"
-
-    if query_type in {"numeric_compute", "text"} and mentions_figure and not need_table:
-        query_type = "chart"
-
-    if query_type not in ALLOWED_QUERY_TYPES:
-        query_type = "text"
-
-    if query_type not in VISUAL_QUERY_TYPES and signals.objects_scope is not None:
-        signals = replace(signals, objects_scope=None)
-
-    if comparator:
-        comparator = comparator if comparator in {">", ">=", "<", "<=", "==", "!="} else None
-    updated_signals = replace(
-        signals,
-        operations=ops,
-        comparator=comparator if comparator else None,
-        threshold=threshold_value if threshold_value is not None else None,
-    )
-
-    return replace(decision, query_type=query_type, signals=updated_signals, risk=risk)
-
-
-__all__ = ["QuestionRouter", "RouterLLMConfig", "RouterLLMCallable", "normalize_router_decision"]
+__all__ = ["QuestionRouter", "RouterLLMConfig", "RouterLLMCallable"]

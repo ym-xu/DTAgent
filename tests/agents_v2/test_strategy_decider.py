@@ -45,7 +45,7 @@ class StrategyPlannerTests(unittest.TestCase):
         self.assertEqual(plan.strategy, StrategyKind.SINGLE)
 
     @staticmethod
-    def _stub_llm(*, question: str, config) -> str:
+    def _stub_llm(*, question: str, config, toc_outline=None) -> str:
         question_lower = question.lower()
         if "图3" in question or "table" in question_lower:
             return json.dumps(

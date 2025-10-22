@@ -140,6 +140,10 @@ class RetrieverResources:
     node_pages: Dict[str, int] = field(default_factory=dict)
     node_physical_pages: Dict[str, int] = field(default_factory=dict)
     base_dir: Optional[Path] = None
+    toc_outline: List[str] = field(default_factory=list)
+    heading_index: Dict[str, List[str]] = field(default_factory=dict)
+    heading_titles: Dict[str, str] = field(default_factory=dict)
+    heading_children: Dict[str, List[str]] = field(default_factory=dict)
 
 
 def build_stub_resources(
@@ -156,6 +160,10 @@ def build_stub_resources(
     node_pages: Dict[str, int] | None = None,
     node_physical_pages: Dict[str, int] | None = None,
     base_dir: Optional[Path] = None,
+    toc_outline: Optional[List[str]] = None,
+    heading_index: Optional[Dict[str, List[str]]] = None,
+    heading_titles: Optional[Dict[str, str]] = None,
+    heading_children: Optional[Dict[str, List[str]]] = None,
 ) -> RetrieverResources:
     """便捷构建器，供测试使用。"""
     label_index = {label: nid for label, nid in label_pairs}
@@ -182,6 +190,10 @@ def build_stub_resources(
         node_pages=node_pages or {},
         node_physical_pages=node_physical_pages or {},
         base_dir=base_dir,
+        toc_outline=toc_outline or [],
+        heading_index=heading_index or {},
+        heading_titles=heading_titles or {},
+        heading_children=heading_children or {},
     )
 
 

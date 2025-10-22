@@ -114,7 +114,7 @@ class RetrieverManagerTests(unittest.TestCase):
             })
 
         self.manager = RetrieverManager(resources, llm_callable=retriever_stub)
-        self.planner = Planner(graph=graph, max_observation_neighbors=5)
+        self.planner = Planner(graph=graph, observation_limit=5)
         self.memory = AgentMemory()
         self.observer = Observer(
             store={

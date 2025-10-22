@@ -55,6 +55,8 @@ def run_question(
     tool_registry = build_default_registry()
     tool_executor = ToolExecutor(tool_registry)
     router = QuestionRouter(llm_callable=router_llm_callable)
+    if getattr(resources, "toc_outline", None):
+        router.attach_toc(resources.toc_outline[:200])
     planner = Planner(graph=graph)
     observer = Observer(store=store, image_analyzer=effective_image_analyzer)
     config = AgentConfig(max_iterations=max_iterations)

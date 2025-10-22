@@ -16,6 +16,8 @@ import json
 import os
 from collections import Counter
 from datetime import datetime, timezone
+from html import unescape
+from html.parser import HTMLParser
 from typing import Any, Dict, Iterable, List, Tuple, Optional
 
 import re
@@ -34,6 +36,8 @@ STOPWORDS = set(
 )
 
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_\-]+")
+TOKEN_ALL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_\-\.%/]*")
+YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
 
 # 关键词白名单（优先保留），面向图表轴/系列/单位等英文术语
 WHITELIST = set(
@@ -102,6 +106,31 @@ def _split_sentences(text: str) -> List[str]:
 
 def _tokens(text: str) -> List[str]:
     return [t.lower() for t in TOKEN_RE.findall(text)]
+
+
+def _tokenize_all(text: Optional[str]) -> List[str]:
+    if not text:
+        return []
+    return [t.lower() for t in TOKEN_ALL_RE.findall(text)]
+
+
+def _unique(seq: Iterable[str]) -> List[str]:
+    seen: Dict[str, bool] = {}
+    out: List[str] = []
+    for item in seq:
+        if not item:
+            continue
+        if item not in seen:
+            seen[item] = True
+            out.append(item)
+    return out
+
+
+def _extract_years(text: Optional[str]) -> List[str]:
+    if not text:
+        return []
+    yrs = [m.group(0) for m in YEAR_RE.finditer(text)]
+    return _unique(yrs)
 
 def _idf_by_sentence(sentences: List[str]) -> Dict[str, float]:
     # sentence-level idf for unsupervised scoring
@@ -380,6 +409,380 @@ def _extract_table_headers(node: Dict[str, Any]) -> List[str]:
     except Exception:
         pass
     return headers
+
+
+class _TableHTMLExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.in_table = False
+        self.in_row = False
+        self.in_cell = False
+        self.in_header_scope = False
+        self._done = False
+        self.current_row: List[str] = []
+        self.current_cell: List[str] = []
+        self.current_cell_is_header = False
+        self.current_row_is_header = False
+        self.rows: List[List[str]] = []
+        self.row_is_header: List[bool] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:  # type: ignore[override]
+        tag_l = tag.lower()
+        if self._done:
+            return
+        if tag_l == "table":
+            if not self.in_table:
+                self.in_table = True
+            return
+        if not self.in_table:
+            return
+        if tag_l == "thead":
+            self.in_header_scope = True
+        elif tag_l == "tr":
+            self._start_row()
+        elif tag_l in ("td", "th"):
+            self._start_cell(is_header=(tag_l == "th") or self.in_header_scope)
+        elif tag_l == "br" and self.in_cell:
+            self.current_cell.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:  # type: ignore[override]
+        tag_l = tag.lower()
+        if tag_l == "table" and self.in_table:
+            if self.in_cell:
+                self._end_cell()
+            if self.in_row:
+                self._end_row()
+            self.in_table = False
+            self._done = True
+            return
+        if not self.in_table:
+            return
+        if tag_l == "thead":
+            self.in_header_scope = False
+        elif tag_l in ("td", "th") and self.in_cell:
+            self._end_cell()
+        elif tag_l == "tr" and self.in_row:
+            self._end_row()
+
+    def handle_startendtag(self, tag: str, attrs) -> None:  # type: ignore[override]
+        if tag.lower() == "br" and self.in_cell:
+            self.current_cell.append("\n")
+
+    def handle_data(self, data: str) -> None:  # type: ignore[override]
+        if self.in_cell and data:
+            self.current_cell.append(data)
+
+    def _start_row(self) -> None:
+        if self.in_row:
+            return
+        self.in_row = True
+        self.current_row = []
+        self.current_row_is_header = False
+
+    def _end_row(self) -> None:
+        self.rows.append(self.current_row)
+        self.row_is_header.append(self.current_row_is_header)
+        self.in_row = False
+        self.current_row = []
+        self.current_row_is_header = False
+
+    def _start_cell(self, *, is_header: bool) -> None:
+        self.in_cell = True
+        self.current_cell = []
+        self.current_cell_is_header = is_header
+
+    def _end_cell(self) -> None:
+        text = self._normalize_cell_text("".join(self.current_cell))
+        self.current_row.append(text)
+        if self.current_cell_is_header:
+            self.current_row_is_header = True
+        self.in_cell = False
+        self.current_cell = []
+        self.current_cell_is_header = False
+
+    @staticmethod
+    def _normalize_cell_text(text: str) -> str:
+        if not text:
+            return ""
+        text = unescape(text)
+        text = text.replace("\r", "")
+        parts = []
+        for line in text.split("\n"):
+            line = re.sub(r"\s+", " ", line.strip())
+            if line:
+                parts.append(line)
+        return "<br>".join(parts)
+
+
+def _coerce_row_length(row: List[str], *, num_cols: int) -> List[str]:
+    if len(row) >= num_cols:
+        return row[:num_cols]
+    return row + [""] * (num_cols - len(row))
+
+
+def _normalize_header_names(headers: List[str]) -> List[str]:
+    if not headers:
+        return headers
+    seen: Dict[str, int] = {}
+    norm_headers: List[str] = []
+    for idx, h in enumerate(headers):
+        name = h.strip() if h else f"col{idx + 1}"
+        if not name:
+            name = f"col{idx + 1}"
+        count = seen.get(name.lower(), 0)
+        if count:
+            name = f"{name}_{count+1}"
+        seen[name.lower()] = count + 1
+        norm_headers.append(name)
+    return norm_headers
+
+
+def _extract_table_struct(node: Dict[str, Any]) -> Tuple[List[str], List[List[str]]]:
+    data = node.get("data")
+    headers: List[str] = []
+    rows: List[List[str]] = []
+    header_idx = 0
+    try:
+        if isinstance(data, str):
+            if "<table" in data.lower():
+                parser = _TableHTMLExtractor()
+                parser.feed(data)
+                parser.close()
+                if parser.rows:
+                    header_idx = next((i for i, is_h in enumerate(parser.row_is_header) if is_h), 0)
+                    headers = parser.rows[header_idx] if parser.rows else []
+                    rows = [r for i, r in enumerate(parser.rows) if i != header_idx]
+            else:
+                # treat as delimited text fallback
+                lines = [line.strip() for line in data.splitlines() if line.strip()]
+                if lines:
+                    parts = [re.split(r"\s*\|\s*", ln) for ln in lines]
+                    headers = parts[0]
+                    rows = parts[1:]
+        elif isinstance(data, list) and data:
+            first = data[0]
+            if isinstance(first, dict):
+                headers = list(first.keys())
+                for record in data:
+                    if isinstance(record, dict):
+                        rows.append([str(record.get(h, "")) for h in headers])
+            elif isinstance(first, (list, tuple)):
+                headers = [str(x) for x in first]
+                for record in data[1:]:
+                    if isinstance(record, (list, tuple)):
+                        rows.append([str(x) for x in record])
+        # fallback: explicit rows field
+        if not rows and isinstance(node.get("rows"), list):
+            row_items = node.get("rows")
+            if row_items:
+                first = row_items[0]
+                if isinstance(first, dict):
+                    if not headers:
+                        headers = list(first.keys())
+                    for record in row_items:
+                        if isinstance(record, dict):
+                            rows.append([str(record.get(h, "")) for h in headers])
+                elif isinstance(first, (list, tuple)):
+                    if not headers:
+                        headers = [f"col{i+1}" for i in range(len(first))]
+                    for record in row_items:
+                        if isinstance(record, (list, tuple)):
+                            rows.append([str(x) for x in record])
+    except Exception:
+        headers, rows = [], []
+
+    headers = _normalize_header_names(headers)
+    if headers and rows:
+        num_cols = len(headers)
+        rows = [_coerce_row_length([str(c) for c in row], num_cols=num_cols) for row in rows]
+    elif rows:
+        num_cols = max(len(row) for row in rows)
+        headers = [f"col{i+1}" for i in range(num_cols)]
+        rows = [_coerce_row_length([str(c) for c in row], num_cols=num_cols) for row in rows]
+    else:
+        headers = []
+        rows = []
+    return headers, rows
+
+
+def _extract_unit_from_header(header: str) -> Optional[str]:
+    if not header:
+        return None
+    m = re.search(r"\(([^)]+)\)", header)
+    if not m:
+        return None
+    return _normalize_unit_token(m.group(1))
+
+
+def _infer_year_from_values(*values: str) -> Optional[str]:
+    for val in values:
+        for year in _extract_years(val):
+            return year
+    return None
+
+
+def _build_table_row_records(
+    table_node: Dict[str, Any],
+    headers: List[str],
+    rows: List[List[str]],
+    *,
+    parent_section: Optional[str],
+    parent_title: Optional[str],
+) -> List[Dict[str, Any]]:
+    if not headers or not rows:
+        return []
+    nid = table_node.get("node_id")
+    if not isinstance(nid, str):
+        return []
+    page_idx = table_node.get("page_idx")
+    label = table_node.get("label")
+    chart_type = table_node.get("kind")
+    records: List[Dict[str, Any]] = []
+    for idx, row in enumerate(rows):
+        row_label = row[0] if row else ""
+        columns: List[Dict[str, Any]] = []
+        token_bag: List[str] = _tokenize_all(row_label)
+        for cidx, header in enumerate(headers):
+            value = row[cidx] if cidx < len(row) else ""
+            unit_from_header = _extract_unit_from_header(header)
+            unit_from_value = None
+            units = _extract_units_set(value)
+            if units:
+                unit_from_value = units[0]
+            unit_final = unit_from_header or unit_from_value
+            year = _infer_year_from_values(header, value)
+            col_tokens = _tokenize_all(header) + _tokenize_all(value)
+            token_bag.extend(col_tokens)
+            if unit_final:
+                token_bag.append(unit_final)
+            col_entry: Dict[str, Any] = {
+                "name": header,
+                "index": cidx,
+                "value": value,
+            }
+            if unit_final:
+                col_entry["unit"] = unit_final
+            if year:
+                try:
+                    col_entry["year"] = int(year)
+                except Exception:
+                    col_entry["year"] = year
+            columns.append(col_entry)
+        dense_text = "; ".join([f"{headers[i]}={row[i]}" for i in range(len(headers))])
+        if row_label and row_label not in dense_text:
+            dense_text = f"{row_label}: {dense_text}"
+        record = {
+            "node_id": nid,
+            "row_id": f"{nid}:row:{idx}",
+            "role": "table_row",
+            "row_index": idx,
+            "row_label": row_label or None,
+            "columns": columns,
+            "dense_text": dense_text,
+            "normalized_tokens": _unique(token_bag),
+            "filters": {
+                **({"page_idx": page_idx} if page_idx is not None else {}),
+                **({"parent_section": parent_section} if parent_section else {}),
+                **({"parent_title": parent_title} if parent_title else {}),
+                **({"label": label} if label else {}),
+                **({"chart_type": chart_type} if chart_type else {}),
+            },
+        }
+        records.append(record)
+    return records
+
+
+def _extract_entities(text: Optional[str]) -> List[str]:
+    if not text:
+        return []
+    # Simple heuristic: capitalized word sequences
+    entities = re.findall(r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)*)\b", text)
+    return _unique([e.strip() for e in entities])
+
+
+def _build_figure_spans(
+    node: Dict[str, Any],
+    *,
+    parent_section: Optional[str],
+    parent_title: Optional[str],
+) -> List[Dict[str, Any]]:
+    nid = node.get("node_id")
+    if not isinstance(nid, str):
+        return []
+    page_idx = node.get("page_idx")
+    chart_type = (node.get("kind") or "").lower() or None
+    spans: List[Dict[str, Any]] = []
+
+    def _add_span(span_role: str, text: Optional[str], *, source: str) -> None:
+        if not text:
+            return
+        text = text.strip()
+        if not text:
+            return
+        tokens = _tokenize_all(text)
+        span_id = f"{nid}:{span_role}:{len(spans)}"
+        span = {
+            "node_id": nid,
+            "span_id": span_id,
+            "role": span_role,
+            "chart_type": chart_type,
+            "dense_text": text,
+            "sparse_tokens": tokens,
+            "entities": _extract_entities(text),
+            "units_set": _extract_units_set(text),
+            "years": _extract_years(text),
+            "source": source,
+            "filters": {
+                **({"page_idx": page_idx} if page_idx is not None else {}),
+                **({"parent_section": parent_section} if parent_section else {}),
+                **({"parent_title": parent_title} if parent_title else {}),
+            },
+        }
+        spans.append(span)
+
+    # caption
+    cap = _gather_caption(node)
+    _add_span("figure_caption", cap, source="caption")
+    # description
+    desc = _text(node.get("description"))
+    _add_span("figure_description", desc, source="description")
+    # legend items
+    legend_items = node.get("legend") or node.get("legend_items")
+    if isinstance(legend_items, str):
+        legend_items = [legend_items]
+    if isinstance(legend_items, list):
+        for item in legend_items:
+            if isinstance(item, str):
+                _add_span("figure_legend", item, source="legend")
+            elif isinstance(item, dict):
+                text = item.get("text") or item.get("label")
+                _add_span("figure_legend", _text(text), source="legend")
+    # axis labels
+    axis = node.get("axis_labels") or node.get("axes")
+    if isinstance(axis, dict):
+        for key in ("x", "y", "z", "x_axis", "y_axis", "z_axis"):
+            if key in axis:
+                _add_span("axis_label", _text(axis[key]), source=key)
+    elif isinstance(axis, list):
+        for item in axis:
+            if isinstance(item, str):
+                _add_span("axis_label", item, source="axis")
+            elif isinstance(item, dict):
+                _add_span("axis_label", _text(item.get("text")), source=item.get("axis") or "axis")
+    # OCR text
+    ocr = node.get("ocr_text")
+    if isinstance(ocr, str):
+        # split into sentences to avoid giant chunks
+        for chunk in re.split(r"[;\n]+", ocr):
+            _add_span("figure_ocr", chunk, source="ocr")
+    elif isinstance(ocr, list):
+        for entry in ocr:
+            if isinstance(entry, str):
+                _add_span("figure_ocr", entry, source="ocr")
+            elif isinstance(entry, dict):
+                _add_span("figure_ocr", _text(entry.get("text")), source="ocr")
+
+    return spans
 
 
 def build_id_index(root: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -716,8 +1119,14 @@ def build_summary(
     dense_leaf: List[Dict[str, Any]] = []
     sparse_coarse: List[Dict[str, Any]] = []
     sparse_leaf: List[Dict[str, Any]] = []
+    table_cells: List[Dict[str, Any]] = []
+    figure_spans: List[Dict[str, Any]] = []
     graph_edges: List[Dict[str, Any]] = []
     id_maps: Dict[str, Any] = {"label2id": {}, "figure": {}, "table": {}}
+    heading_titles: Dict[str, str] = {}
+    heading_paths_map: Dict[str, List[str]] = {}
+    heading_children: Dict[str, List[str]] = {}
+    heading_keyword_map: Dict[str, List[str]] = {}
 
     def _chunk_text(s: str, limit: int = 600, overlap: int = 100) -> List[Tuple[str, int]]:
         s = re.sub(r"\s+", " ", (s or "").strip())
@@ -1071,13 +1480,28 @@ def build_summary(
         if role in ("section", "image", "table"):
             units_set = _extract_units_set(node.get("dense_text") or "", node.get("title") or "")
             if role == "section":
-                # Aggregate subtree features
                 sec_agg = _aggregate_section_subtree(id2node.get(nid) or {}, id2node)
                 headings_path = _ancestor_titles(nid, parent_map, id2node)
-                # Build four dense variants
                 title = node.get("title") or ""
                 gist_text = node.get("dense_text") or ""
-                # child surface: summarize basis
+                if title:
+                    heading_titles[nid] = title
+                full_path = headings_path + ([title] if title else [])
+                if full_path:
+                    heading_paths_map[nid] = full_path
+                orig_section = id2node.get(nid) or {}
+                children_ids: List[str] = []
+                for ch in orig_section.get("children", []) or []:
+                    if isinstance(ch, dict) and isinstance(ch.get("node_id"), str):
+                        children_ids.append(ch["node_id"])
+                if children_ids:
+                    heading_children[nid] = children_ids
+                for kw in sec_agg.get("keywords_topk") or []:
+                    if kw:
+                        heading_keyword_map.setdefault(kw.lower(), []).append(nid)
+                for tok in _tokens(title):
+                    if tok:
+                        heading_keyword_map.setdefault(tok.lower(), []).append(nid)
                 child_basis = sec_agg.get("child_surface_basis") or ""
                 child_text = summarize_text_block(
                     title=title,
@@ -1088,7 +1512,6 @@ def build_summary(
                 )
                 path_text = " > ".join(headings_path + [str(title)]) if headings_path or title else title
 
-                # common filters + affordances
                 common_filters = {
                     **({"page_idx": node.get("page_idx")} if node.get("page_idx") is not None else {}),
                     **({"level": node.get("level")} if node.get("level") is not None else {}),
@@ -1128,7 +1551,6 @@ def build_summary(
                             "representatives": sec_agg.get("representatives"),
                         },
                     })
-                # Sparse doc for section (single)
                 child_labels = "; ".join(sec_agg.get("child_labels") or []) or None
                 child_schema = "; ".join(sec_agg.get("child_table_schema") or []) or None
                 caption_bag = sec_agg.get("caption_bag") or None
@@ -1150,7 +1572,13 @@ def build_summary(
                     },
                 })
             else:
-                # image/table default dense + sparse
+                orig = dict(id2node.get(nid) or {})
+                if node.get("label") and "label" not in orig:
+                    orig["label"] = node.get("label")
+                if node.get("kind") and "kind" not in orig:
+                    orig["kind"] = node.get("kind")
+                if node.get("page_idx") is not None and orig.get("page_idx") is None:
+                    orig["page_idx"] = node.get("page_idx")
                 dense_coarse.append({
                     "node_id": nid,
                     "role": role,
@@ -1175,11 +1603,9 @@ def build_summary(
                         "supports_TREND": ("trend" in (node.get("dense_text") or "").lower()) or (node.get("kind") == "statistical"),
                     },
                 })
-                # Build strong fields for BM25F: caption/table_schema when applicable
                 cap_txt = None
                 schema = None
                 try:
-                    orig = id2node.get(nid) if isinstance(nid, str) else None
                     if role == "image" and orig:
                         cap_txt = _gather_caption(orig) or None
                     elif role == "table" and orig:
@@ -1206,6 +1632,38 @@ def build_summary(
                         **({"units_set": units_set} if units_set else {}),
                     },
                 })
+                if role == "image":
+                    spans = _build_figure_spans(
+                        orig,
+                        parent_section=node.get("parent_section"),
+                        parent_title=node.get("parent_title"),
+                    )
+                    if spans:
+                        figure_spans.extend(spans)
+                        for span in spans:
+                            graph_edges.append({
+                                "src": nid,
+                                "dst": span["span_id"],
+                                "type": "has_span",
+                                "span_role": span.get("role"),
+                            })
+                elif role == "table":
+                    headers, row_values = _extract_table_struct(orig)
+                    row_records = _build_table_row_records(
+                        orig,
+                        headers,
+                        row_values,
+                        parent_section=node.get("parent_section"),
+                        parent_title=node.get("parent_title"),
+                    )
+                    if row_records:
+                        table_cells.extend(row_records)
+                        for rec in row_records:
+                            graph_edges.append({
+                                "src": nid,
+                                "dst": rec["row_id"],
+                                "type": "has_row",
+                            })
             # Graph edges: already appended for image/table via parent_section
         else:
             # Skip adding non-chunk leaf entries to dense/sparse views to avoid duplication.
@@ -1291,6 +1749,32 @@ def build_summary(
             a = arr[i][1]; b = arr[i+1][1]
             graph_edges.append({"src": a, "dst": b, "type": "prev_next"})
 
+    keyword_map_clean = {k: _unique(v) for k, v in heading_keyword_map.items()}
+    heading_index = {
+        "heading_titles": heading_titles,
+        "heading_paths": heading_paths_map,
+        "heading_children": heading_children,
+        "keyword_map": keyword_map_clean,
+    }
+    meta_conf = summary_obj.get("meta", {})
+    metadata = {
+        "doc_id": doc_id,
+        "generated_at": meta_conf.get("ts"),
+        "summary_model": meta_conf.get("model"),
+        "include_leaves": bool(include_leaves),
+        "use_llm": bool(use_llm),
+        "llm_model": meta_conf.get("llm_model"),
+        "counts": {
+            "dense_coarse": len(dense_coarse),
+            "dense_leaf": len(dense_leaf),
+            "sparse_coarse": len(sparse_coarse),
+            "sparse_leaf": len(sparse_leaf),
+            "table_cells": len(table_cells),
+            "figure_spans": len(figure_spans),
+            "graph_edges": len(graph_edges),
+        },
+    }
+
     return (
         summary_obj,
         coarse_entries,
@@ -1299,6 +1783,10 @@ def build_summary(
         dense_leaf,
         sparse_coarse,
         sparse_leaf,
+        table_cells,
+        figure_spans,
         graph_edges,
+        heading_index,
+        metadata,
         {"label2id": id_maps["label2id"], "figure": id_maps["figure"], "table": id_maps["table"]},
     )

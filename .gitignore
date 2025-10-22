@@ -204,3 +204,6 @@ mineru.py
 /_stats
 
 /node_modules
+
+/LongDocURL_ a*
+/MMLongBench-Doc_ B*

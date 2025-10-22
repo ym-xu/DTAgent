@@ -14,6 +14,8 @@ from .adapters import (
     table_index,
     vlm_answer,
     judger_verify,
+    toc_anchor,
+    structure_expand,
 )
 
 
@@ -24,6 +26,9 @@ def build_default_registry() -> ToolRegistry:
     registry.register("dense_node.search", dense_node.search)
     registry.register("page_locator.locate", page_locator.locate)
     registry.register("figure_finder.find_regions", figure_finder.find_regions)
+    registry.register("structure.expand", structure_expand.expand)
+    registry.register("structure.children", structure_expand.children)
+    registry.register("toc_anchor.locate", toc_anchor.locate)
     registry.register("table_index.search", table_index.search)
     registry.register("chart_index.search", chart_index.search)
     registry.register("extract.column", extract.column)

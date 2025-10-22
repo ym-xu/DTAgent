@@ -193,7 +193,25 @@ class AgentOrchestrator:
             outcome = StageOutcome(stage=stage, hits=hits)
             self._run_observers(hits)
 
-            answer = self.reasoner.run(question, self.memory.snapshot())
+            if hits:
+                print("[Retriever Hits]")
+                for hit in hits:
+                    print(f"  - {hit.node_id} (score={hit.score:.3f}, tool={hit.tool})")
+            else:
+                print("[Retriever Hits] None")
+
+            snapshot = self.memory.snapshot()
+            observed = snapshot.get("observations", {})
+            reasoner_nodes: List[str] = []
+            if isinstance(observed, dict):
+                try:
+                    reasoner_nodes = [obs.node_id for obs in observed.values() if getattr(obs, "node_id", None)]  # type: ignore[attr-defined]
+                except Exception:
+                    reasoner_nodes = [str(node_id) for node_id in observed.keys()]
+            if reasoner_nodes:
+                print("[Reasoner Candidate Nodes]", reasoner_nodes)
+
+            answer = self.reasoner.run(question, snapshot)
             outcome.answer = answer
 
             if answer.action == "REPLAN":
@@ -591,6 +609,9 @@ class AgentOrchestrator:
             "table_index.search": "dense_search",
         }
         args["_legacy_tool"] = legacy_tool_map.get(step.tool)
+        graph = getattr(self.planner, "graph", None)
+        if graph is not None:
+            args["_doc_graph"] = graph
         if step.tool == "vlm.answer":
             images, rois = self._gather_images_for_vlm(step, args, context)
             if images:

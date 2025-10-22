@@ -54,6 +54,7 @@ class StrategyStep:
     save_as: Optional[str] = None
     when: Optional[str] = None
     uses: Optional[List[str]] = None
+    meta: Dict[str, Any] = field(default_factory=dict)
 
     def describe(self) -> str:
         """返回易读描述，便于日志与调试。"""
@@ -73,6 +74,7 @@ class StrategyStage:
     params: Dict[str, Any] = field(default_factory=dict)
     run_if: Optional[str] = None
     step_ids: List[str] = field(default_factory=list)
+    evidence_type: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +213,8 @@ class RouterSignals:
     objects_scope: Optional[str] = None
     threshold: Optional[float] = None
     comparator: Optional[str] = None
+    evidence_hint: Optional[str] = None
+    mentions: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

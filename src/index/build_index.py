@@ -63,7 +63,21 @@ def run(
     # Summaries
     ensure_dir(out_dir)
     doc_id = infer_doc_id(doc_path)
-    summary_obj, _coarse_legacy, _leaf_legacy, dense_coarse, dense_leaf, sparse_coarse, sparse_leaf, graph_edges, id_maps = build_summary(
+    (
+        summary_obj,
+        _coarse_legacy,
+        _leaf_legacy,
+        dense_coarse,
+        dense_leaf,
+        sparse_coarse,
+        sparse_leaf,
+        table_cells,
+        figure_spans,
+        graph_edges,
+        heading_index,
+        metadata,
+        id_maps,
+    ) = build_summary(
         doctree_path=doc_path,
         out_dir=out_dir,
         doc_id=doc_id,
@@ -103,14 +117,28 @@ def run(
         p_sparse_leaf = os.path.join(out_dir, "sparse_leaf.jsonl")
         _write_jsonl(p_sparse_leaf, sparse_leaf)
         _mark(p_sparse_leaf)
+    p_table_cells = os.path.join(out_dir, "table_cells.jsonl")
+    _write_jsonl(p_table_cells, table_cells)
+    _mark(p_table_cells)
+    p_figure_spans = os.path.join(out_dir, "figure_spans.jsonl")
+    _write_jsonl(p_figure_spans, figure_spans)
+    _mark(p_figure_spans)
     # graph_edges 输出
     p_edges = os.path.join(out_dir, "graph_edges.jsonl")
     _write_jsonl(p_edges, graph_edges)
     _mark(p_edges)
+    heading_index_path = os.path.join(out_dir, "heading_index.json")
+    with open(heading_index_path, "w", encoding="utf-8") as f:
+        json.dump(heading_index, f, ensure_ascii=False, indent=2)
+    _mark(heading_index_path)
     p_idmaps = os.path.join(out_dir, "id_maps.json")
     with open(p_idmaps, "w", encoding="utf-8") as f:
         json.dump(id_maps, f, ensure_ascii=False, indent=2)
     _mark(p_idmaps)
+    metadata_path = os.path.join(out_dir, "metadata.json")
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    _mark(metadata_path)
 
     # Optional: build FAISS indices if available (coarse/leaf)
     def _build_faiss(name: str, records: list[dict]) -> None:

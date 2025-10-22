@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple, Set
 
 from .planner import DocGraphNavigator
+from .utils.toc_utils import format_heading_outline
 from .retriever import RetrieverResources
 from .observer import NodeEvidence
 
@@ -49,7 +50,7 @@ def build_resources_from_index(doc_dir: Path) -> Tuple[RetrieverResources, DocGr
 
     summary = _read_json(summary_path)
     nodes = summary.get("nodes", [])
-    doctree_map, parent_map = _load_doctree_map(doc_dir)
+    doctree_map, parent_map, doctree_root = _load_doctree_map(doc_dir)
 
     label_index: Dict[str, str] = {}
     page_index: Dict[int, List[str]] = defaultdict(list)
@@ -221,9 +222,51 @@ def build_resources_from_index(doc_dir: Path) -> Tuple[RetrieverResources, DocGr
         node_pages=node_pages,
         node_physical_pages=node_physical_pages,
         base_dir=doc_dir,
+        toc_outline=[],
+        heading_index={},
     )
 
+    if doctree_root:
+        heading_index: Dict[str, List[str]] = defaultdict(list)
+        heading_titles: Dict[str, str] = {}
+        heading_children: Dict[str, List[str]] = defaultdict(list)
+
+        def _walk(node: Dict, parent_id: Optional[str]) -> None:
+            if not isinstance(node, dict):
+                return
+            node_id = node.get("node_id")
+            node_type = str(node.get("role") or node.get("type") or "").lower()
+            heading_text = _extract_heading_text(node)
+            if isinstance(node_id, str) and heading_text and node_type in {"section", "heading"}:
+                key = _normalize_heading_key(heading_text)
+                heading_index[key].append(node_id)
+                heading_titles[node_id] = heading_text
+                if parent_id:
+                    heading_children[parent_id].append(node_id)
+
+            for child in node.get("children", []) or []:
+                if isinstance(child, dict):
+                    child_id = child.get("node_id") if isinstance(child.get("node_id"), str) else None
+                    _walk(child, node_id if isinstance(node_id, str) else parent_id)
+
+        _walk(doctree_root, None)
+        resources.heading_index = {k: v for k, v in heading_index.items()}
+        resources.heading_titles = heading_titles
+        resources.heading_children = {k: v for k, v in heading_children.items()}
+
     graph = _build_graph(edges_path)
+    if doctree_root:
+        try:
+            toc = format_heading_outline(
+                doctree_root,
+                by_logical_page=True,
+                include_meta=False,
+                include_media=False,
+                max_len=80,
+            )
+            resources.toc_outline = toc[:200]
+        except Exception:
+            resources.toc_outline = []
     return resources, graph
 
 
@@ -232,7 +275,7 @@ def _load_dense_views(doc_dir: Path) -> Tuple[Dict[str, Dict[str, str]], Dict[st
     dense_views: Dict[str, Dict[str, str]] = defaultdict(dict)
     dense_base_ids: Dict[str, Dict[str, str]] = defaultdict(dict)
     if not path.exists():
-        return {}, {}
+        return {}, {}, None
     for rec in _read_jsonl(path):
         node_id = rec.get("node_id")
         dense_text = rec.get("dense_text")
@@ -329,7 +372,7 @@ def build_observer_store(doc_dir: Path) -> Dict[str, NodeEvidence]:
             extra={k: v for k, v in extra.items() if v is not None},
         )
 
-    doctree_map, _ = _load_doctree_map(doc_dir)
+    doctree_map, _, _ = _load_doctree_map(doc_dir)
     if doctree_map:
         for node_id, node in doctree_map.items():
             role = node.get("role") or node.get("type")
@@ -394,7 +437,7 @@ def build_observer_store(doc_dir: Path) -> Dict[str, NodeEvidence]:
     return store
 
 
-def _load_doctree_map(doc_dir: Path) -> Tuple[Dict[str, dict], Dict[str, str]]:
+def _load_doctree_map(doc_dir: Path) -> Tuple[Dict[str, dict], Dict[str, str], Optional[dict]]:
     path = doc_dir / "doctree.mm.json"
     if not path.exists():
         parent = doc_dir.parent
@@ -419,7 +462,7 @@ def _load_doctree_map(doc_dir: Path) -> Tuple[Dict[str, dict], Dict[str, str]]:
         for ch in cur.get("children", []) or []:
             if isinstance(ch, dict):
                 stack.append((ch, nid if isinstance(nid, str) else parent_id))
-    return id_map, parent_map
+    return id_map, parent_map, root
 
 
 def _parse_table_node(node: dict) -> Dict[str, object] | None:
@@ -630,6 +673,24 @@ def _resolve_image_path(image_path: Optional[str], base_dir: Path) -> Optional[s
         if resolved.exists():
             return str(resolved)
     return None
+
+
+def _extract_heading_text(node: dict) -> Optional[str]:
+    for key in ("heading_text", "text", "title", "label"):
+        value = node.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    caption = _extract_caption(node)
+    if caption:
+        return caption
+    node_id = node.get("node_id")
+    if isinstance(node_id, str) and node_id.strip():
+        return node_id.strip()
+    return None
+
+
+def _normalize_heading_key(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().lower()
 
 
 __all__ = ["build_resources_from_index", "build_observer_store"]

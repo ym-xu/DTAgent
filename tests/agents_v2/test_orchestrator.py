@@ -34,7 +34,7 @@ class OrchestratorIntegrationTests(unittest.TestCase):
         }
         router = QuestionRouter(llm_callable=self._stub_router_llm)
         strategy_decider = RetrievalStrategyPlanner(llm_callable=self._stub_strategy_llm)
-        planner = Planner(graph=graph, max_observation_neighbors=5)
+        planner = Planner(graph=graph, observation_limit=5)
         retriever = RetrieverManager(resources)
         observer = Observer(store=node_store)
         def stub_llm(**kwargs):
@@ -103,7 +103,7 @@ class OrchestratorIntegrationTests(unittest.TestCase):
     # --- helpers ---
 
     @staticmethod
-    def _stub_router_llm(*, question: str, config) -> str:
+    def _stub_router_llm(*, question: str, config, toc_outline=None) -> str:  # noqa: D401
         return json.dumps(
             {
                 "query": question,

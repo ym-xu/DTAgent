@@ -32,7 +32,7 @@ def chart_read_axis(call: ToolCall) -> ToolResult:
     context = call.args.get("_context") or {}
     manager = _require_manager(call.args.get("_retriever_manager"))
 
-    source_key = call.args.get("source")
+    source_key = call.args.get("source") or call.args.get("from")
     if not isinstance(source_key, str):
         return ToolResult(status="error", data={}, metrics={}, error="source step_id required")
     source_result = context.get(source_key)
@@ -77,7 +77,7 @@ def column(call: ToolCall) -> ToolResult:
     manager = _require_manager(call.args.get("_retriever_manager"))
     step = _require_step(call.args.get("_step"))
 
-    source_key = call.args.get("source")
+    source_key = call.args.get("source") or call.args.get("from")
     if not isinstance(source_key, str):
         return ToolResult(status="error", data={}, metrics={}, error="source step_id required")
     source_result = context.get(source_key)
@@ -89,12 +89,32 @@ def column(call: ToolCall) -> ToolResult:
         return ToolResult(status="empty", data={"rows": []}, metrics={"n_rows": 0, "source": source_key})
 
     value_hints = _to_str_list(call.args.get("value_hints"))
-    label_hints = _to_str_list(call.args.get("label_hints"))
+    label_hints_base = _to_str_list(call.args.get("label_hints"))
     unit_hint = _clean_str(call.args.get("unit"))
     years = [int(y) for y in call.args.get("years") or [] if _is_int_like(y)]
 
     rows = []
     for hit in hits:
+        label_hints = list(label_hints_base)
+        allowed_rows: Optional[List[int]] = None
+        metadata = hit.metadata if isinstance(hit.metadata, dict) else {}
+        meta_rows = metadata.get("rows")
+        if isinstance(meta_rows, list):
+            allowed_rows = []
+            for item in meta_rows:
+                if not isinstance(item, dict):
+                    continue
+                idx = item.get("row_index")
+                if isinstance(idx, int):
+                    allowed_rows.append(idx)
+                label = item.get("row_label")
+                if isinstance(label, str) and label.strip():
+                    low = label.strip()
+                    if low not in label_hints:
+                        label_hints.append(low)
+            if not allowed_rows:
+                allowed_rows = None
+
         structured = manager.resources.tables.get(hit.node_id)
         if structured:
             parsed_struct = _rows_from_structured(
@@ -104,6 +124,7 @@ def column(call: ToolCall) -> ToolResult:
                 label_hints=label_hints,
                 unit_hint=unit_hint,
                 years=years,
+                allowed_rows=allowed_rows,
             )
             rows.extend(parsed_struct)
             if parsed_struct:
@@ -317,6 +338,7 @@ def _rows_from_structured(
     label_hints: List[str],
     unit_hint: Optional[str],
     years: List[int],
+    allowed_rows: Optional[Sequence[int]] = None,
 ) -> List[Dict[str, object]]:
     columns = table.get("columns") or []
     rows_data = table.get("rows") or []
@@ -328,6 +350,7 @@ def _rows_from_structured(
     value_hints_lower = [vh.lower() for vh in value_hints]
     label_hints_lower = [lh.lower() for lh in label_hints]
     numeric_pattern = re.compile(r"-?\d[\d,]*(?:\.\d+)?")
+    allowed_set = set(allowed_rows) if allowed_rows is not None else None
 
     label_idx = 0
     value_idxs: List[int] = []
@@ -352,10 +375,12 @@ def _rows_from_structured(
     year_strings = {str(y) for y in years}
     visual_hint = table.get("caption") or table.get("preview")
     extracted: List[Dict[str, object]] = []
-    for row in rows_data:
+    for row_idx, row in enumerate(rows_data):
         if not isinstance(row, (list, tuple)):
             continue
         if label_idx >= len(row):
+            continue
+        if allowed_set is not None and row_idx not in allowed_set:
             continue
         label = str(row[label_idx]).strip()
         if label_hints_lower and label and not any(h in label.lower() for h in label_hints_lower):

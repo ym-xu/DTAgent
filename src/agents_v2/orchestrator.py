@@ -62,7 +62,6 @@ class AgentOrchestrator:
         retriever_manager,
         observer,
         reasoner,
-        strategy_planner=None,
         llm_judger: Optional[LLMJudger] = None,
         tool_executor: Optional[ToolExecutor] = None,
         config: Optional[AgentConfig] = None,
@@ -70,7 +69,6 @@ class AgentOrchestrator:
         self.config = config or AgentConfig()
         self.memory = AgentMemory()
         self.router = router
-        self.strategy_planner = strategy_planner
         self.planner = planner
         self.retriever_manager = retriever_manager
         self.observer = observer
@@ -93,13 +91,6 @@ class AgentOrchestrator:
         decision = self.router.route(question)
         self.memory.push_router(decision)
         return decision
-
-    def decide_strategy(self, question: str) -> StrategyPlan:
-        if not self.strategy_planner:
-            raise MissingDependencyError("strategy_planner is missing")
-        plan = self.strategy_planner.decide(question)
-        self.memory.push_strategy(plan)
-        return plan
 
     def run(self, question: str) -> ReasonerAnswer:
         return self.run_with_callback(question)
@@ -277,8 +268,6 @@ class AgentOrchestrator:
         if not plan.is_empty():
             self.memory.push_strategy(plan)
             return plan
-        if self.strategy_planner:
-            return self.decide_strategy(question)
         self.memory.push_strategy(plan)
         return plan
 

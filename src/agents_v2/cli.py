@@ -6,6 +6,8 @@ import argparse
 import logging
 from pathlib import Path
 from typing import List, Optional, Tuple
+from dataclasses import asdict
+import json
 
 from .loaders import build_observer_store, build_resources_from_index
 from .observer import Observer, build_llm_image_analyzer
@@ -15,7 +17,6 @@ from .reasoner import LLMCallable, Reasoner, ReasonerLLMConfig
 from .schemas import ReasonerAnswer, StrategyPlan
 from .retriever import RetrieverLLMCallable, RetrieverManager
 from .router import QuestionRouter, RouterLLMCallable
-from .strategy_planner import StrategyLLMCallable
 from .toolhub import ToolExecutor, build_default_registry
 
 DEFAULT_LLM_BACKEND = "gpt"
@@ -31,7 +32,6 @@ def run_question(
     max_iterations: int = 3,
     llm_callable: Optional[LLMCallable] = None,
     image_analyzer=None,
-    strategy_llm_callable: Optional[StrategyLLMCallable] = None,
     router_llm_callable: Optional[RouterLLMCallable] = None,
     retriever_llm_callable: Optional[RetrieverLLMCallable] = None,
 ) -> Tuple[ReasonerAnswer, AgentOrchestrator, List[StrategyPlan]]:
@@ -79,6 +79,8 @@ def run_question(
         label = "Strategy Plan" if len(plans_emitted) == 1 else f"Strategy Plan (iteration {len(plans_emitted)})"
         print(f"\n{label}:")
         print(_format_strategy(plan))
+        # print("\nRaw StrategyPlan JSON:")
+        # print(json.dumps(asdict(plan), ensure_ascii=False, indent=2))
 
     answer = orchestrator.run_with_callback(question, on_plan=_on_plan)
     return answer, orchestrator, plans_emitted

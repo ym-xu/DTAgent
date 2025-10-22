@@ -124,7 +124,7 @@ The agent operates through an **iterative navigation–observation–reasoning l
 - `src/agents_v2/schemas.py`：统一动作、策略、观测、回答等数据结构。
 - `src/agents_v2/memory.py`：缓存问题、策略、检索结果与观察证据。
 - `src/agents_v2/router.py`：LLM Router，识别问题类型与结构化信号。
-- `src/agents_v2/strategy_planner.py`：LLM 检索策略生成（过渡实现，待由 Router+StrategyCard 替换）。
+- 旧版 `strategy_planner` 已移除，所有规划统一走 Router→Planner→Plan-IR→StrategyPlan 主链路。
 - `src/agents_v2/planner.py`：从 Router 决策自动生成检索计划（阶段/步骤/回退），并把策略转换为检索与观察动作。
 - `src/agents_v2/toolhub/`：Tool Cards 规范实现，含 ToolRegistry/Executor 与各工具适配器骨架。
 - `src/agents_v2/retriever/manager.py`：执行 `jump_to` / 稀疏 / 稠密 / 混合检索，当前使用 JSON 索引（向量、BM25 仍为轻量实现）。
@@ -139,7 +139,7 @@ The agent operates through an **iterative navigation–observation–reasoning l
 - Loader 会从 `summary.json`/`dense_coarse.jsonl`/`graph_edges.jsonl` 读取索引，拼出 `DocGraphNavigator` 与 `RetrieverResources`，并区分逻辑页/物理页索引供视觉链路使用。
 - Planner 已对接新版 ToolHub：表格问题自动生成 `table_index.search → extract.column → compute.filter`，图表问题走 `chart_index.search → extract.chart_read_axis`，视觉问题采用 `page_locator.locate → figure_finder.find_regions → vlm.answer` 三段式。
 - Router 会输出 query_type 候选列表；Planner 依据候选自动构造多阶段策略并根据覆盖度/置信度门控是否执行后续阶段。
-- Orchestrator 现在默认仅通过 Router → Planner 生成检索计划，旧版 `RetrievalStrategyPlanner` 不再作为主路径；若 Router 生成空计划也会回落到规则计划而非旧 LLM。
+- Orchestrator 现在仅通过 Router → Planner 生成检索计划，旧版 `RetrievalStrategyPlanner` 已移除，不再提供兜底策略。
 - CLI 改为写死默认 LLM/VLM，无需再传入模型参数；仍保留可通过注入 callable 覆盖的测试钩子。
 - Reasoner 强制走 LLM 流程；若 LLM 返回空结果，则请求 `REPLAN`，并结合 Judger 得分纳入阶段质量函数。
 

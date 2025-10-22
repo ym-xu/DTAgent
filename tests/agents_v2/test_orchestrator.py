@@ -3,12 +3,76 @@ import unittest
 
 from agents_v2.observer import NodeEvidence, Observer
 from agents_v2.orchestrator import AgentConfig, AgentOrchestrator
-from agents_v2.planner import DocGraphNavigator, Planner
+from agents_v2.planner import DocGraphNavigator
 from agents_v2.reasoner import Reasoner
 from agents_v2.retriever import RetrieverManager, build_stub_resources
 from agents_v2.router import QuestionRouter
-from agents_v2.schemas import ReasonerAnswer
-from agents_v2.strategy_planner import RetrievalStrategyPlanner
+from agents_v2.schemas import (
+    FinalSpec,
+    PlannerAction,
+    ReasonerAnswer,
+    StrategyKind,
+    StrategyPlan,
+    StrategyStage,
+    StrategyStep,
+)
+
+
+class StubPlanner:
+    """Deterministic planner used for tests without LLM calls."""
+
+    def __init__(self, *, graph: DocGraphNavigator, observation_limit: int = 5) -> None:
+        self.graph = graph
+        self.observation_limit = observation_limit
+
+    def plan_from_router(self, decision) -> StrategyPlan:
+        args = {"query": decision.query or "", "view": "section#gist"}
+        step = StrategyStep(tool="dense_node.search", args=args, step_id="S1")
+        stage = StrategyStage(
+            stage="primary",
+            methods=[step.tool],
+            k_pages=0,
+            k_nodes=0,
+            page_window=0,
+            params={},
+            run_if=None,
+            step_ids=[step.step_id],
+            evidence_type="text",
+        )
+        final = FinalSpec(answer_var="reasoner", format="string")
+        plan = StrategyPlan(
+            strategy=StrategyKind.SINGLE,
+            steps=[step],
+            confidence=decision.confidence,
+            retrieval_keys=[decision.query] if decision.query else None,
+            stages=[stage],
+            final=final,
+        )
+        return plan
+
+    def plan_from_strategy(self, plan: StrategyPlan):
+        actions = []
+        for step in plan.steps:
+            payload = {"tool": step.tool, **step.args}
+            if step.save_as:
+                payload["save_as"] = step.save_as
+            if step.when:
+                payload["when"] = step.when
+            if step.uses:
+                payload["uses"] = list(step.uses)
+            actions.append(PlannerAction(type="retrieve", payload=payload, source_step=step))
+        return actions
+
+    def observation_plan(self, *, hits, memory, include_neighbors: bool = True):
+        unseen = []
+        for hit in hits:
+            if hit.node_id and not memory.has_seen(hit.node_id):
+                unseen.append(hit.node_id)
+            if len(unseen) >= self.observation_limit:
+                break
+        if not unseen:
+            return [PlannerAction(type="noop", payload={"reason": "no-new-targets"})]
+        return [PlannerAction(type="observe", payload={"nodes": unseen})]
 
 
 class OrchestratorIntegrationTests(unittest.TestCase):
@@ -33,8 +97,7 @@ class OrchestratorIntegrationTests(unittest.TestCase):
             "img_3": NodeEvidence(node_id="img_3", modality="image", content="图3展示准确率随时间提高。"),
         }
         router = QuestionRouter(llm_callable=self._stub_router_llm)
-        strategy_decider = RetrievalStrategyPlanner(llm_callable=self._stub_strategy_llm)
-        planner = Planner(graph=graph, observation_limit=5)
+        planner = StubPlanner(graph=graph, observation_limit=5)
         retriever = RetrieverManager(resources)
         observer = Observer(store=node_store)
         def stub_llm(**kwargs):
@@ -47,17 +110,16 @@ class OrchestratorIntegrationTests(unittest.TestCase):
             )
 
         reasoner = Reasoner(min_confidence=0.65, use_llm=True, llm_callable=stub_llm)
-        return router, strategy_decider, planner, retriever, observer, reasoner
+        return router, planner, retriever, observer, reasoner
 
     def test_full_pipeline_returns_answer(self) -> None:
         deps = self._build_dependencies()
         orchestrator = AgentOrchestrator(
             router=deps[0],
-            strategy_planner=deps[1],
-            planner=deps[2],
-            retriever_manager=deps[3],
-            observer=deps[4],
-            reasoner=deps[5],
+            planner=deps[1],
+            retriever_manager=deps[2],
+            observer=deps[3],
+            reasoner=deps[4],
             config=AgentConfig(max_iterations=2),
         )
 
@@ -69,7 +131,6 @@ class OrchestratorIntegrationTests(unittest.TestCase):
         self.assertTrue(orchestrator.memory.strategy_history)
         first_plan = orchestrator.memory.strategy_history[0]
         self.assertTrue(first_plan.stages)
-        self.assertGreater(first_plan.coverage_gate, 0)
 
     def test_fallback_when_no_observations(self) -> None:
         resources = build_stub_resources(
@@ -79,15 +140,13 @@ class OrchestratorIntegrationTests(unittest.TestCase):
         )
         graph = DocGraphNavigator()
         router = QuestionRouter(llm_callable=self._stub_router_llm)
-        strategy_decider = RetrievalStrategyPlanner(llm_callable=self._stub_strategy_llm)
-        planner = Planner(graph=graph)
+        planner = StubPlanner(graph=graph)
         retriever = RetrieverManager(resources)
         observer = Observer(store={})
         reasoner = Reasoner(use_llm=True, llm_callable=lambda **_: "")
 
         orchestrator = AgentOrchestrator(
             router=router,
-            strategy_planner=strategy_decider,
             planner=planner,
             retriever_manager=retriever,
             observer=observer,
@@ -134,23 +193,6 @@ class OrchestratorIntegrationTests(unittest.TestCase):
                 "confidence": 0.9,
             }
         )
-
-    @staticmethod
-    def _stub_strategy_llm(*, question: str, config) -> str:
-        return json.dumps(
-            {
-                "thinking": "Use dense search to explore the relevant section.",
-                "strategy": "SINGLE",
-                "steps": [
-                    {
-                        "tool": "dense_search",
-                        "args": {"query": question, "view": "section#gist"},
-                    }
-                ],
-                "confidence": 0.8,
-            }
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

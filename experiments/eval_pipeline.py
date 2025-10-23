@@ -9,7 +9,6 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import pandas as pd
 from openai import OpenAI
 
 from agents_v2.cli import run_question
@@ -233,6 +232,7 @@ def main() -> None:
     parser.add_argument("--model", type=str, default="gpt-4o", help="Model name for answer evaluation")
     parser.add_argument("--dump-json", type=Path, help="Optional path to save detailed JSON results")
     parser.add_argument("--limit", type=int, help="Optional limit on number of samples")
+    parser.add_argument("--offset", type=int, default=0, help="Number of samples to skip from the beginning")
     args = parser.parse_args()
 
     prompt_text = DEFAULT_PROMPT
@@ -247,6 +247,7 @@ def main() -> None:
         answer_report=args.answer_report,
         detailed_json=args.dump_json,
         limit=args.limit,
+        offset=args.offset or 0,
     )
 
 

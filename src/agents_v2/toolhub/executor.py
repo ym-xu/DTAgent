@@ -11,7 +11,7 @@ import time
 from typing import Optional
 
 from .registry import ToolRegistry
-from .types import ToolCall, ToolResult
+from .types import CommonError, ToolCall, ToolResult
 
 
 class ToolExecutor:
@@ -36,7 +36,7 @@ class ToolExecutor:
                 if attempt > self.max_retries:
                     return ToolResult(
                         status="error",
-                        data={},
+                        errors=[CommonError(error="RUNTIME_ERROR", message=last_error or "runtime error", retryable=False)],
                         metrics={"latency_ms": latency_ms, "attempt": attempt},
                         error=last_error,
                     )
@@ -48,7 +48,7 @@ class ToolExecutor:
 
         return ToolResult(
             status="error",
-            data={},
+            errors=[CommonError(error="MAX_RETRIES", message=last_error or "unknown error", retryable=False)],
             metrics={"attempt": attempt},
             error=last_error or "UNKNOWN_ERROR",
         )

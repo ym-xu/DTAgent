@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Protocol, Sequence, Tuple
@@ -139,6 +140,8 @@ class RetrieverResources:
     image_meta: Dict[str, Dict[str, object]] = field(default_factory=dict)
     node_pages: Dict[str, int] = field(default_factory=dict)
     node_physical_pages: Dict[str, int] = field(default_factory=dict)
+    figure_spans: Dict[str, List[Dict[str, object]]] = field(default_factory=dict)
+    figure_tokens: Dict[str, List[str]] = field(default_factory=dict)
     base_dir: Optional[Path] = None
     toc_outline: List[str] = field(default_factory=list)
     heading_index: Dict[str, List[str]] = field(default_factory=dict)
@@ -159,6 +162,8 @@ def build_stub_resources(
     image_meta: Dict[str, Dict[str, object]] | None = None,
     node_pages: Dict[str, int] | None = None,
     node_physical_pages: Dict[str, int] | None = None,
+    figure_spans: Dict[str, List[Dict[str, object]]] | None = None,
+    figure_tokens: Dict[str, List[str]] | None = None,
     base_dir: Optional[Path] = None,
     toc_outline: Optional[List[str]] = None,
     heading_index: Optional[Dict[str, List[str]]] = None,
@@ -176,6 +181,12 @@ def build_stub_resources(
         view: {nid: nid.split("#")[0] for nid in corpus.keys()}
         for view, corpus in dense_views.items()
     }
+    if figure_tokens is None and figure_spans:
+        figure_tokens = {
+            node_id: _tokens_from_spans(spans)
+            for node_id, spans in figure_spans.items()
+        }
+
     return RetrieverResources(
         label_index=label_index,
         page_index=page_index,
@@ -189,12 +200,40 @@ def build_stub_resources(
         image_meta=image_meta or {},
         node_pages=node_pages or {},
         node_physical_pages=node_physical_pages or {},
+        figure_spans=figure_spans or {},
+        figure_tokens=figure_tokens or {},
         base_dir=base_dir,
         toc_outline=toc_outline or [],
         heading_index=heading_index or {},
         heading_titles=heading_titles or {},
         heading_children=heading_children or {},
     )
+
+
+def _tokens_from_spans(spans: List[Dict[str, object]]) -> List[str]:
+    tokens: List[str] = []
+    for span in spans:
+        if not isinstance(span, dict):
+            continue
+        dense = span.get("dense_text")
+        if isinstance(dense, str):
+            tokens.extend(_expanded_tokens(dense))
+        sparse = span.get("sparse_tokens")
+        if isinstance(sparse, list):
+            for item in sparse:
+                if isinstance(item, str):
+                    tokens.append(item.lower())
+        chart_type = span.get("chart_type")
+        if isinstance(chart_type, str):
+            tokens.extend(_expanded_tokens(chart_type))
+    return tokens
+
+
+def _expanded_tokens(text: str) -> List[str]:
+    words = re.findall(r"[a-z0-9]+", text.lower())
+    tokens = list(words)
+    tokens.extend(f"{words[i]}_{words[i+1]}" for i in range(len(words) - 1))
+    return tokens
 
 
 class RetrieverManager:

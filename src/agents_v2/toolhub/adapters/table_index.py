@@ -1,22 +1,19 @@
-"""Table index adapter.
-
-复用 RetrieverManager 的 dense/sparse 检索，为表格查询提供统一入口。
-"""
+"""Table index adapter built on RetrieverResources."""
 
 from __future__ import annotations
 
 from typing import Dict, List, Optional, Sequence
 
-from ...retriever.manager import RetrieverManager
-from ...schemas import RetrievalHit, StrategyStep
-from ..types import ToolCall, ToolResult
+from ...retriever.manager import RetrieverManager, RetrieverResources
+from ..common import clamp_score
+from ..types import CommonHit, ToolCall, ToolResult
 
 
 def search(call: ToolCall) -> ToolResult:
-    manager = _require_manager(call.args.get("_retriever_manager"))
-    _require_step(call.args.get("_step"))
+    resources = _resolve_resources(call)
+    if resources is None:
+        raise RuntimeError("table_index.search requires RetrieverResources")
 
-    resources = manager.resources
     tables = getattr(resources, "tables", {}) or {}
 
     keys_raw = call.args.get("keys")
@@ -30,9 +27,7 @@ def search(call: ToolCall) -> ToolResult:
     if query_term:
         keyword_terms.append(query_term.lower())
 
-    if not row_terms:
-        inferred = [term for term in column_terms if term and len(term.split()) <= 3]
-        row_terms = _unique_extend([], inferred)
+    user_provided_row_terms = bool(row_terms)
     keyword_terms = _unique_extend(keyword_terms, column_terms)
     keyword_terms = _unique_extend(keyword_terms, row_terms)
 
@@ -42,7 +37,7 @@ def search(call: ToolCall) -> ToolResult:
         units.append(unit.lower())
     years = _normalize_years(filters.get("years"))
 
-    annotated_hits: List[RetrievalHit] = []
+    common_hits: List[CommonHit] = []
 
     for table_id, table in tables.items():
         columns = _ensure_list(table.get("columns"))
@@ -62,7 +57,7 @@ def search(call: ToolCall) -> ToolResult:
                 cells=cells,
                 columns=columns,
                 column_terms=column_terms,
-                row_terms=row_terms,
+                row_terms=row_terms if user_provided_row_terms else [],
                 keyword_terms=keyword_terms,
                 units=units,
                 years=years,
@@ -119,33 +114,54 @@ def search(call: ToolCall) -> ToolResult:
             "filters": filters,
             "keys": keys,
         }
-        annotated_hits.append(
-            RetrievalHit(
+        provenance = {
+            "tool": "table_index.search",
+            "view": "table",
+            "table_id": table_id,
+        }
+        if matched_rows:
+            first = matched_rows[0]
+            if isinstance(first, dict) and first.get("row_index") is not None:
+                provenance["row_index"] = first.get("row_index")
+        common_hits.append(
+            CommonHit(
                 node_id=table_id,
-                score=score,
-                tool="table_index.search",
-                metadata=metadata,
+                evidence_type="table",
+                score=clamp_score(score),
+                provenance=provenance,
+                modality="table",
+                affordances=["row_lookup", "column_lookup"],
+                meta=metadata,
             )
         )
 
-    status = "ok" if annotated_hits else "empty"
+    status = "ok" if common_hits else "empty"
     metrics = {
-        "n_hits": len(annotated_hits),
+        "n_hits": len(common_hits),
         "n_tables": len(tables),
     }
-    return ToolResult(status=status, data={"hits": annotated_hits, "filters": filters, "keys": keys}, metrics=metrics)
+    return ToolResult(
+        status=status,
+        hits=common_hits,
+        metrics=metrics,
+        info={
+            "filters": filters,
+            "keys": keys,
+            "view": "table",
+            "evidence_type": "table",
+            "modality": "table",
+        },
+    )
 
 
-def _require_manager(manager: Optional[RetrieverManager]) -> RetrieverManager:
-    if not isinstance(manager, RetrieverManager):
-        raise RuntimeError("table_index.search requires RetrieverManager instance")
-    return manager
-
-
-def _require_step(step: Optional[StrategyStep]) -> StrategyStep:
-    if not isinstance(step, StrategyStep):
-        raise RuntimeError("table_index.search requires StrategyStep context")
-    return step
+def _resolve_resources(call: ToolCall) -> Optional[RetrieverResources]:
+    resources = call.args.get("_resources")
+    if isinstance(resources, RetrieverResources):
+        return resources
+    manager = call.args.get("_retriever_manager")
+    if isinstance(manager, RetrieverManager):
+        return manager.resources
+    return None
 
 
 def _clean_str(value) -> Optional[str]:

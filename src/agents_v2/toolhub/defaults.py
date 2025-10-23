@@ -10,9 +10,11 @@ from .adapters import (
     dense_node,
     extract,
     figure_finder,
+    chart_screener,
     page_locator,
     table_index,
     vlm_answer,
+    pack_mmr,
     judger_verify,
     toc_anchor,
     structure_expand,
@@ -30,12 +32,16 @@ def build_default_registry() -> ToolRegistry:
     registry.register("structure.children", structure_expand.children)
     registry.register("toc_anchor.locate", toc_anchor.locate)
     registry.register("table_index.search", table_index.search)
+    registry.register("pack.mmr_knapsack", pack_mmr.mmr_knapsack)
     registry.register("chart_index.search", chart_index.search)
     registry.register("extract.column", extract.column)
     registry.register("extract.chart_read_axis", extract.chart_read_axis)
+    registry.register("extract.regex", extract.regex)
     registry.register("compute.filter", compute.filter)
+    registry.register("compute.eval", compute.eval)
     registry.register("vlm.answer", vlm_answer.answer)
     registry.register("judger.verify", judger_verify.verify)
+    registry.register("chart_screener.screen", chart_screener.screen)
     return registry
 
 

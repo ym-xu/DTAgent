@@ -207,6 +207,7 @@ def build_resources_from_index(doc_dir: Path) -> Tuple[RetrieverResources, DocGr
 
     dense_views, dense_base_ids = _load_dense_views(doc_dir)
     sparse_docs = _load_sparse_docs(doc_dir)
+    figure_spans_map, figure_tokens_map = _load_figure_spans(doc_dir)
 
     resources = RetrieverResources(
         label_index=label_index,
@@ -221,6 +222,8 @@ def build_resources_from_index(doc_dir: Path) -> Tuple[RetrieverResources, DocGr
         image_meta=image_meta,
         node_pages=node_pages,
         node_physical_pages=node_physical_pages,
+        figure_spans=figure_spans_map,
+        figure_tokens=figure_tokens_map,
         base_dir=doc_dir,
         toc_outline=[],
         heading_index={},
@@ -306,6 +309,51 @@ def _load_sparse_docs(doc_dir: Path) -> Dict[str, Dict[str, str]]:
                 fields[key] = val.strip()
         docs[doc_id] = fields
     return docs
+
+
+def _load_figure_spans(doc_dir: Path) -> Tuple[Dict[str, List[Dict[str, object]]], Dict[str, List[str]]]:
+    path = doc_dir / "figure_spans.jsonl"
+    spans_map: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    tokens_map: Dict[str, List[str]] = defaultdict(list)
+    if not path.exists():
+        return {}, {}
+    for rec in _read_jsonl(path):
+        node_id = rec.get("node_id")
+        if not isinstance(node_id, str):
+            continue
+        spans_map[node_id].append(rec)
+        tokens = _collect_span_tokens(rec)
+        if tokens:
+            tokens_map[node_id].extend(tokens)
+    return {node: spans for node, spans in spans_map.items()}, {node: tokens for node, tokens in tokens_map.items()}
+
+
+def _collect_span_tokens(span: Dict[str, object]) -> List[str]:
+    tokens: List[str] = []
+    dense = span.get("dense_text")
+    if isinstance(dense, str):
+        tokens.extend(_expanded_tokens(dense))
+    sparse = span.get("sparse_tokens")
+    if isinstance(sparse, list):
+        for item in sparse:
+            if isinstance(item, str):
+                tokens.append(item.lower())
+    chart_type = span.get("chart_type")
+    if isinstance(chart_type, str):
+        tokens.extend(_expanded_tokens(chart_type))
+    return tokens
+
+
+def _tokenize_text(text: str) -> List[str]:
+    text = text.lower()
+    return [token for token in re.findall(r"[a-z0-9]+", text)]
+
+
+def _expanded_tokens(text: str) -> List[str]:
+    words = _tokenize_text(text)
+    tokens = list(words)
+    tokens.extend(f"{words[i]}_{words[i+1]}" for i in range(len(words) - 1))
+    return tokens
 
 
 def _build_graph(edges_path: Path) -> DocGraphNavigator:

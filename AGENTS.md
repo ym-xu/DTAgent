@@ -140,6 +140,9 @@ The agent operates through an **iterative navigation–observation–reasoning l
 - Planner 已对接新版 ToolHub：表格问题自动生成 `table_index.search → extract.column → compute.filter`，图表问题走 `chart_index.search → extract.chart_read_axis`，视觉问题采用 `page_locator.locate → figure_finder.find_regions → vlm.answer` 三段式。
 - Router 会输出 query_type 候选列表；Planner 依据候选自动构造多阶段策略并根据覆盖度/置信度门控是否执行后续阶段。
 - Orchestrator 现在仅通过 Router → Planner 生成检索计划，旧版 `RetrievalStrategyPlanner` 已移除，不再提供兜底策略。
+- ToolHub 执行层统一为 `CommonHit/CommonError/ToolResult` 契约，核心检索/抽取适配器（dense/bm25/table/chart/page/structure 等）均输出节点级命中及 provenance/meta，便于后续 Pack 与 Reasoner 消费。
+- `pack.mmr_knapsack` 与 `compute.eval` 工具已经在 ToolHub 完成实现，可支持证据打包与基础数值运算。
+- 图像链路已加载 `figure_spans.jsonl` 并在 `figure_finder`/`chart_screener` 中使用，能够返回 ROI/角色信息并基于启发式识别图表。
 - CLI 改为写死默认 LLM/VLM，无需再传入模型参数；仍保留可通过注入 callable 覆盖的测试钩子。
 - Reasoner 强制走 LLM 流程；若 LLM 返回空结果，则请求 `REPLAN`，并结合 Judger 得分纳入阶段质量函数。
 
@@ -149,7 +152,10 @@ The agent operates through an **iterative navigation–observation–reasoning l
 - 向量 / BM25 检索仍是轻量文本匹配，尚未对接 `.faiss` 或 BM25 文件。
 - Reasoner prompt 尚未针对不同任务做更细粒度模板（如数值验证、列名指令等）。
 - 缺少完整 trace / metrics 导出，尚未把阶段质量与 Judger 结果写入日志。
-- 表格/图像证据仍需要更细粒度的字段（例如单元格定位、坐标信息），以及 `compute.eval` 等数值工具的实现。
+- 表格/图像证据仍需要更细粒度的字段（例如单元格定位、坐标信息），同时需要扩展 `compute.*` 链路以覆盖百分比换算、差值等复杂算子。
+- 图像/图表链路仍缺真实像素推理及 ROI 坐标级信号，当前 `chart_screener` 仅依赖启发式，需要接入视觉模型提升准确度。
+- Judger/格式化工具尚未落地，需要在新的 `ToolResult` 框架上实现 `format.enforce_*` 等以控制证据预算并规范答案形式。
+- 检索仍依赖旧版 `RetrieverManager` 的 LLM rerank；后续需改造为“本地检索 → 结构扩展 → `rank.llm` 工具卡”流程，并保留是否启用 LLM 的配置开关。
 
 ## ⚙️ 3. Data Flow Summary
 ```text
@@ -560,10 +566,10 @@ JSON/JSONL
     - `types.py`：ToolCall / ToolResult / Hit
     - `registry.py`：ToolRegistry（注册/查找）
     - `executor.py`：ToolExecutor（延迟记录 + 错误收敛）
-    - `adapters/`：12 张工具卡占位（bm25_node/page、table_index、chart_index、structure.expand、pack.mmr_knapsack、page_locator、figure_finder、chart_screener、vlm_count、extract.*、compute.eval、reader.answer、judger.verify）
+    - `adapters/`：工具卡按 `{检索 → 扩展 → 打包 → 计算 → 阅读/裁决}` 链路划分（bm25_node/page、table_index、chart_index、structure.expand、pack.mmr_knapsack、page_locator、figure_finder、chart_screener、vlm_count、extract.*、compute.eval、reader.answer、judger.verify）
 - **当前状态**：
-  - 适配器目前均返回 `NOT_IMPLEMENTED`。
-  - Orchestrator 会先调用 ToolHub（写入占位结果），随后仍回退到 `RetrieverManager` 执行原有稠密/稀疏检索，因此线上行为与旧版本一致。
+  - 大部分检索/抽取/打包工具已可用，少量（如 `chart_screener`、`vlm_count`）仍为占位实现。
+  - Orchestrator 会先调用 ToolHub（写入占位结果），随后在全部步骤失败时才回退至旧版 `RetrieverManager`。
 - **优先事项**：
   1. 实现最小工具集：将 `RetrieverManager`、pack、VLM 计数等逻辑迁移至 ToolHub 适配器。
   2. 完成 ToolHub 执行链：并发检索 → RRF → expand → pack → coverage gate → steps → Reader/Judger → Finalizer。

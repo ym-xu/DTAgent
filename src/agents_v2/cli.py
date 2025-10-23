@@ -92,13 +92,44 @@ def _format_strategy(plan) -> str:
         header += f" | thinking: {plan.thinking}"
     if getattr(plan, "retrieval_keys", None):
         header += f" | keys: {', '.join(plan.retrieval_keys)}"
-    lines = [header]
-    for stage in getattr(plan, "stages", []) or []:
+    lines: List[str] = [header]
+
+    stages = getattr(plan, "stages", []) or []
+    step_map: Dict[str, List[StrategyStep]] = {}
+    for stage in stages:
+        if stage.step_ids:
+            ordered: List[StrategyStep] = []
+            seen = set()
+            for step in plan.steps:
+                sid = getattr(step, "step_id", None)
+                if sid and sid in stage.step_ids and sid not in seen:
+                    ordered.append(step)
+                    seen.add(sid)
+            step_map[stage.stage] = ordered
+        else:
+            step_map[stage.stage] = []
+
+    used_steps: set[str] = set()
+    for idx, stage in enumerate(stages):
+        if idx > 0:
+            lines.append("")
         lines.append(
             f"    stage={stage.stage}, methods={stage.methods}, k_pages={stage.k_pages}, "
             f"k_nodes={stage.k_nodes}, page_window={stage.page_window}"
         )
+        stage_steps = step_map.get(stage.stage, [])
+        if stage_steps:
+            for step in stage_steps:
+                sid = getattr(step, "step_id", None)
+                if isinstance(sid, str):
+                    used_steps.add(sid)
+                lines.append(f"      - {step.describe()}")
+
+    # Append any remaining steps (without stage mapping)
     for step in plan.steps:
+        sid = getattr(step, "step_id", None)
+        if isinstance(sid, str) and sid in used_steps:
+            continue
         lines.append(f"    * {step.describe()}")
     return "\n".join(lines)
 

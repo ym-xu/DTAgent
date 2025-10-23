@@ -28,7 +28,7 @@ class ReasonerLLMConfig:
     """LLM 调用配置。"""
 
     backend: str = "gpt"
-    model: str = "gpt-4o-mini"
+    model: str = "gpt-4o"
     temperature: float = 0.2
     max_response_tokens: int = 256
 
@@ -166,8 +166,8 @@ class Reasoner:
             raw = llm_call(question=question, context=context, config=self.llm_config)
             logger.debug("Reasoner LLM input preview: %s", context[:600])
             logger.debug("Reasoner LLM output preview: %s", (raw or "")[:600])
-            print(f"[Reasoner LLM Input] {context[:600]}...")
-            print(f"[Reasoner LLM Output] {raw[:600]}...")
+            print(f"[Reasoner LLM Input] {context}...")
+            print(f"[Reasoner LLM Output] {raw}...")
         except Exception as exc:
             logger.exception("Reasoner LLM invocation failed")
             return None

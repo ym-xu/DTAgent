@@ -10,6 +10,11 @@ from typing import Optional
 
 from ...retriever.manager import RetrieverManager
 from ...schemas import StrategyStep
+from ..common import (
+    common_hit_from_retrieval,
+    map_view_to_evidence,
+    map_view_to_modality,
+)
 from ..types import ToolCall, ToolResult
 
 
@@ -22,17 +27,28 @@ def search(call: ToolCall) -> ToolResult:
     legacy_tool = call.args.get("_legacy_tool") or "dense_search"
     exec_step = replace(step, tool=legacy_tool)
 
-    hits = manager.execute(exec_step, memory)
-    status = "ok" if hits else "empty"
+    hits_raw = manager.execute(exec_step, memory)
+    view = str(call.args.get("view") or step.args.get("view") or "section#gist")
+    common_hits = [
+        common_hit_from_retrieval(hit, tool_name=legacy_tool, view=view)
+        for hit in hits_raw
+    ]
+    status = "ok" if common_hits else "empty"
     metrics = {
         "mode": mode,
-        "n_hits": len(hits),
+        "n_hits": len(common_hits),
         "legacy_tool": legacy_tool,
     }
     return ToolResult(
         status=status,
-        data={"hits": hits, "mode": mode},
         metrics=metrics,
+        hits=common_hits,
+        info={
+            "mode": mode,
+            "view": view,
+            "evidence_type": map_view_to_evidence(view),
+            "modality": map_view_to_modality(view),
+        },
     )
 
 
@@ -46,6 +62,5 @@ def _require_step(step: Optional[StrategyStep]) -> StrategyStep:
     if not isinstance(step, StrategyStep):
         raise RuntimeError("dense_node.search requires StrategyStep context")
     return step
-
 
 __all__ = ["search"]

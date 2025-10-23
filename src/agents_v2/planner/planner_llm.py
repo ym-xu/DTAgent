@@ -26,6 +26,8 @@ TOOL_WHITELIST = [
     "extract.chart_read_axis",
     "extract.regex",
     "compute.filter",
+    "compute.eval",
+    "pack.mmr_knapsack",
     "vlm.answer",
 ]
 
@@ -45,6 +47,8 @@ TOOL_DESCRIPTIONS: Dict[str, str] = {
     "extract.chart_read_axis": "Read quantitative series from chart descriptions/captions produced by retrieval steps.",
     "extract.regex": "Apply regular-expression extraction over text hits (e.g., pulling numbers, dates, tokens).",
     "compute.filter": "Filter structured rows by comparator/threshold/unit (supports inequality conditions).",
+    "compute.eval": "Aggregate numeric rows (sum/avg/max/min/count) from earlier extraction/filter results.",
+    "pack.mmr_knapsack": "Select a budgeted subset of hits using MMR to balance relevance and diversity before reasoning.",
     "vlm.answer": "Call the visual-language model to reason over image regions returned by figure tools.",
 }
 
@@ -90,6 +94,10 @@ FEW_SHOT_EXAMPLES = [
                     "name": "table_stage",
                     "evidence_type": "table",
                     "run_if": None,
+                    "params": {
+                        "pack": {"limit": 6, "per_page_limit": 2},
+                        "k_nodes": 6,
+                    },
                     "graph": [
                         {
                             "id": "T",
@@ -111,6 +119,20 @@ FEW_SHOT_EXAMPLES = [
                             },
                             "save_as": "VALS",
                             "uses": ["T"],
+                        },
+                        {
+                            "id": "PK",
+                            "op": "pack.mmr_knapsack",
+                            "args": {"source": ["T", "E"], "limit": 6, "per_page_limit": 2},
+                            "save_as": "PACKED",
+                            "uses": ["T", "E"],
+                        },
+                        {
+                            "id": "AGG",
+                            "op": "compute.eval",
+                            "args": {"source": "E", "operation": "max", "round": 1},
+                            "save_as": "MAX_VAL",
+                            "uses": ["E"],
                         },
                     ],
                 },
@@ -344,6 +366,9 @@ def _parse_plan_ir(obj: Any) -> PlanIR:
         run_if = stage_obj.get("run_if")
         if run_if is not None and not isinstance(run_if, str):
             run_if = None
+        params = stage_obj.get("params")
+        if not isinstance(params, dict):
+            params = {}
         graph_data = stage_obj.get("graph")
         if not isinstance(graph_data, list) or not graph_data:
             raise RuntimeError("Stage graph must contain at least one node")
@@ -352,7 +377,7 @@ def _parse_plan_ir(obj: Any) -> PlanIR:
         nodes: List[PlanNode] = []
         for node_obj in graph_data:
             nodes.append(_parse_plan_node(node_obj))
-        stages.append(PlanStage(name=str(name), evidence_type=evidence_type.lower(), run_if=run_if, graph=nodes))
+        stages.append(PlanStage(name=str(name), evidence_type=evidence_type.lower(), run_if=run_if, params=params, graph=nodes))
 
     meta = obj.get("meta") if isinstance(obj.get("meta"), dict) else {}
     return PlanIR(

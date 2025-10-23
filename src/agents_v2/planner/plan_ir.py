@@ -20,6 +20,7 @@ class PlanStage:
     name: str
     evidence_type: str
     run_if: Optional[str]
+    params: Dict[str, Any] = field(default_factory=dict)
     graph: List[PlanNode] = field(default_factory=list)
 
 

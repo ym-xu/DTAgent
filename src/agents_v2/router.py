@@ -164,7 +164,7 @@ def _default_router_llm_callable(
     from src.utils.llm_clients import gpt_llm_call, qwen_llm_call  # type: ignore
 
     payload_data = {"question": question}
-    print("toc_outline: ",toc_outline)
+    # print("toc_outline: ",toc_outline)
     if toc_outline:
         payload_data["toc_outline"] = toc_outline
     payload = json.dumps(payload_data, ensure_ascii=False)

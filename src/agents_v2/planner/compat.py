@@ -42,6 +42,8 @@ RETRIEVE_TOOLS = {
     "extract.chart_read_axis",
     "extract.regex",
     "compute.filter",
+    "compute.eval",
+    "pack.mmr_knapsack",
     "vlm.answer",
 }
 

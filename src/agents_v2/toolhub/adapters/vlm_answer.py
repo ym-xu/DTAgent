@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
 from ...observer import _resolve_image_path, _to_data_url  # type: ignore
-from ..types import ToolCall, ToolResult
+from ..types import CommonError, ToolCall, ToolResult
 
 try:
     from src.utils.llm_clients import gpt_llm_call, qwen_llm_call  # type: ignore
@@ -28,12 +28,20 @@ DEFAULT_SYSTEM_PROMPT = (
 def answer(call: ToolCall) -> ToolResult:
     question = _clean_str(call.args.get("question"))
     if not question:
-        return ToolResult(status="error", data={}, metrics={}, error="question is required")
+        return ToolResult(
+            status="error",
+            errors=[CommonError(error="INVALID_ARGS", message="question is required", retryable=False)],
+            error="question is required",
+        )
 
     image_inputs = call.args.get("images") or call.args.get("image_path")
     image_paths = _normalize_images(image_inputs)
     if not image_paths:
-        return ToolResult(status="error", data={}, metrics={}, error="images are required")
+        return ToolResult(
+            status="error",
+            errors=[CommonError(error="INVALID_ARGS", message="images are required", retryable=False)],
+            error="images are required",
+        )
 
     base_dir = call.args.get("base_dir")
     if base_dir:
@@ -51,7 +59,11 @@ def answer(call: ToolCall) -> ToolResult:
             resolved_paths.append(str(resolved))
 
     if not data_urls:
-        return ToolResult(status="error", data={}, metrics={}, error="unable to load image paths")
+        return ToolResult(
+            status="error",
+            errors=[CommonError(error="RESOURCE_ERROR", message="unable to load image paths", retryable=False)],
+            error="unable to load image paths",
+        )
 
     backend = _clean_str(call.args.get("backend")) or "gpt"
     model = _clean_str(call.args.get("model")) or ("gpt-4o" if backend == "gpt" else "qwen-vl-plus")
@@ -120,7 +132,7 @@ def answer(call: ToolCall) -> ToolResult:
     }
     status = "ok" if answers else "empty"
     metrics = {"n_images": len(resolved_paths)}
-    return ToolResult(status=status, data=data, metrics=metrics)
+    return ToolResult(status=status, hits=[], metrics=metrics, info=data)
 
 
 def _call_vlm(system: str, payload: dict, backend: str, model: str, images: Sequence[str]) -> str:

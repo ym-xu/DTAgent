@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Iterable, List, Optional, Set
 
 from ...retriever.manager import RetrieverManager
-from ...schemas import RetrievalHit
-from ..types import ToolCall, ToolResult
+from ..types import CommonHit, ToolCall, ToolResult
 
 
 def expand(call: ToolCall) -> ToolResult:
@@ -27,9 +26,20 @@ def expand(call: ToolCall) -> ToolResult:
             if nid not in seen:
                 seen.add(nid)
                 neighbors.append(nid)
-    hits = [RetrievalHit(node_id=nid, score=0.6, tool="structure.expand") for nid in neighbors]
+    hits = [
+        CommonHit(
+            node_id=nid,
+            evidence_type="layout",
+            score=0.6,
+            provenance={"tool": "structure.expand"},
+            modality="text",
+            affordances=["neighbors"],
+            meta={"source": list(seeds)},
+        )
+        for nid in neighbors
+    ]
     status = "ok" if hits else "empty"
-    return ToolResult(status=status, data={"hits": hits}, metrics={"n_hits": len(hits)})
+    return ToolResult(status=status, hits=hits, metrics={"n_hits": len(hits)})
 
 
 def children(call: ToolCall) -> ToolResult:
@@ -56,9 +66,20 @@ def children(call: ToolCall) -> ToolResult:
                 continue
             seen.add(child)
             results.append(child)
-    hits = [RetrievalHit(node_id=nid, score=0.7, tool="structure.children") for nid in results]
+    hits = [
+        CommonHit(
+            node_id=nid,
+            evidence_type="layout",
+            score=0.7,
+            provenance={"tool": "structure.children", "parent": list(seeds)},
+            modality="text",
+            affordances=["child"],
+            meta={"role": node_roles.get(nid)},
+        )
+        for nid in results
+    ]
     status = "ok" if hits else "empty"
-    return ToolResult(status=status, data={"hits": hits}, metrics={"n_hits": len(hits)})
+    return ToolResult(status=status, hits=hits, metrics={"n_hits": len(hits)})
 
 
 def _collect_seed_nodes(call: ToolCall) -> List[str]:
@@ -80,12 +101,15 @@ def _resolve_reference(ref: str, call: ToolCall) -> List[str]:
     result = context.get(ref)
     nodes: List[str] = []
     if isinstance(result, ToolResult):
-        data = result.data or {}
-        hits = data.get("hits")
-        if isinstance(hits, list):
-            for hit in hits:
-                if isinstance(hit, RetrievalHit) and hit.node_id:
-                    nodes.append(hit.node_id)
+        for hit in getattr(result, "hits", []) or []:
+            node_id = getattr(hit, "node_id", None)
+            if isinstance(node_id, str):
+                nodes.append(node_id)
+        if not nodes and isinstance(getattr(result, "data", None), dict):
+            for hit in result.data.get("hits", []):
+                node_id = getattr(hit, "node_id", None)
+                if isinstance(node_id, str):
+                    nodes.append(node_id)
     if not nodes and ref:
         nodes.append(ref)
     return nodes

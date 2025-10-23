@@ -31,6 +31,8 @@ StrategyToolName = Literal[
     "extract.chart_read_axis",
     "compute.filter",
     "compute.eval",
+    "chart_screener.screen",
+    "pack.mmr_knapsack",
     "vlm.answer",
     "judger.verify",
     # legacy support (will be deprecated)

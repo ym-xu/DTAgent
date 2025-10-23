@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Dict, Iterable, List, Optional
 
 from ...retriever.manager import RetrieverManager
-from ...schemas import RetrievalHit
-from ..types import ToolCall, ToolResult
+from ..types import CommonHit, ToolCall, ToolResult
 
 
 def locate(call: ToolCall) -> ToolResult:
@@ -21,7 +20,7 @@ def locate(call: ToolCall) -> ToolResult:
     heading_titles = getattr(resources, "heading_titles", {}) or {}
 
     if not heading_index:
-        return ToolResult(status="empty", data={"hits": []}, metrics={"reason": "no-heading-index"})
+        return ToolResult(status="empty", hits=[], metrics={"reason": "no-heading-index"})
 
     scores: Dict[str, float] = {}
     matched_heading: Dict[str, str] = {}
@@ -38,19 +37,26 @@ def locate(call: ToolCall) -> ToolResult:
                     matched_heading[nid] = heading_text
 
     if not scores:
-        return ToolResult(status="empty", data={"hits": []}, metrics={"reason": "no-match"})
+        return ToolResult(status="empty", hits=[], metrics={"reason": "no-match"})
 
-    hits = [
-        RetrievalHit(node_id=node_id, score=min(1.0, sc), tool="toc_anchor.locate")
+    common_hits = [
+        CommonHit(
+            node_id=node_id,
+            evidence_type="layout",
+            score=min(1.0, sc),
+            provenance={"tool": "toc_anchor.locate"},
+            modality="text",
+            affordances=["heading"],
+            meta={"heading": heading_titles.get(node_id) or matched_heading.get(node_id, "")},
+        )
         for node_id, sc in sorted(scores.items(), key=lambda item: item[1], reverse=True)
     ]
-    payload = {
-        "hits": hits,
+    info = {
         "matched_headings": {
             nid: heading_titles.get(nid) or matched_heading.get(nid, "") for nid in scores
-        },
+        }
     }
-    return ToolResult(status="ok", data=payload, metrics={"n_hits": len(hits)})
+    return ToolResult(status="ok", hits=common_hits, metrics={"n_hits": len(common_hits)}, info=info)
 
 
 def _normalize(text: str) -> str:

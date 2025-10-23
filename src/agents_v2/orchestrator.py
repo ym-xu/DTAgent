@@ -8,7 +8,7 @@ AgentOrchestrator
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from .memory import AgentMemory
 from .schemas import (
@@ -23,6 +23,7 @@ from .schemas import (
     RetrievalHit,
 )
 from .toolhub import ToolCall, ToolExecutor, ToolResult
+from .toolhub.types import CommonHit
 from .judger import LLMJudger
 
 
@@ -172,7 +173,7 @@ class AgentOrchestrator:
         ctx: Dict[str, float] = {}
         need_replan = False
 
-        for stage in stages:
+        for idx, stage in enumerate(stages):
             if not self._should_run_stage(stage, ctx):
                 continue
 
@@ -183,6 +184,15 @@ class AgentOrchestrator:
             hits = self._execute_actions(stage_actions)
             outcome = StageOutcome(stage=stage, hits=hits)
             self._run_observers(hits)
+
+            if idx < len(stages) - 1 and not hits:
+                ctx["prev_coverage"] = 0.0
+                outcomes.append(outcome)
+                continue
+
+            coverage_value = self._estimate_coverage(hits, stage)
+            outcome.metrics["coverage_pre"] = coverage_value
+            ctx["prev_coverage"] = coverage_value
 
             if hits:
                 print("[Retriever Hits]")
@@ -303,6 +313,7 @@ class AgentOrchestrator:
         context: Dict[str, ToolResult] = {}
         hits: List[RetrievalHit] = []
         all_error = True
+        pack_override: Optional[List[RetrievalHit]] = None
 
         for action in actions:
             step = self._extract_step(action)
@@ -317,11 +328,22 @@ class AgentOrchestrator:
             extracted = self._extract_hits_from_result(result)
             if extracted:
                 hits.extend(extracted)
+            if tool_id == "pack.mmr_knapsack":
+                pack_override = list(extracted) if extracted is not None else []
             if tool_id == "vlm.answer":
                 self._record_vlm_observation(tool_id, step, call_args, result)
             if tool_id == "judger.verify":
-                context["judger.verdict"] = result.data or {}
+                verdict = {}
+                if isinstance(result.info, dict):
+                    verdict.update(result.info)
+                data_prop = getattr(result, "data", None)
+                if isinstance(data_prop, dict):
+                    for key, value in data_prop.items():
+                        verdict.setdefault(key, value)
+                context["judger.verdict"] = verdict
 
+        if pack_override is not None:
+            hits = pack_override
         if all_error:
             return None
         return hits
@@ -598,6 +620,9 @@ class AgentOrchestrator:
             "table_index.search": "dense_search",
         }
         args["_legacy_tool"] = legacy_tool_map.get(step.tool)
+        resources = getattr(self.retriever_manager, "resources", None)
+        if resources is not None:
+            args["_resources"] = resources
         graph = getattr(self.planner, "graph", None)
         if graph is not None:
             args["_doc_graph"] = graph
@@ -624,11 +649,35 @@ class AgentOrchestrator:
 
     @staticmethod
     def _extract_hits_from_result(result: ToolResult) -> List[RetrievalHit]:
-        data = result.data or {}
-        hits = data.get("hits")
-        if isinstance(hits, list):
-            return [hit for hit in hits if isinstance(hit, RetrievalHit)]
-        return []
+        converted: List[RetrievalHit] = []
+        if getattr(result, "hits", None):
+            for hit in result.hits:
+                if not isinstance(hit, CommonHit):
+                    continue
+                provenance = dict(hit.provenance)
+                metadata: Dict[str, Any] = {
+                    "evidence_type": hit.evidence_type,
+                    "provenance": provenance,
+                }
+                if hit.affordances:
+                    metadata["affordances"] = list(hit.affordances)
+                if hit.meta:
+                    metadata["meta"] = dict(hit.meta)
+                tool_name = provenance.get("tool") or "unknown"
+                converted.append(
+                    RetrievalHit(
+                        node_id=hit.node_id,
+                        score=float(hit.score),
+                        tool=tool_name,  # type: ignore[arg-type]
+                        metadata=metadata,
+                    )
+                )
+        else:
+            data = result.data or {}
+            hits = data.get("hits")
+            if isinstance(hits, list):
+                converted.extend(hit for hit in hits if isinstance(hit, RetrievalHit))
+        return converted
 
     def _gather_images_for_vlm(
         self,
@@ -740,8 +789,13 @@ class AgentOrchestrator:
                 result = context.get(use)
                 if not isinstance(result, ToolResult):
                     continue
-                data = result.data if isinstance(result.data, dict) else {}
-                rois_data = data.get("rois")
+                combined_info: Dict[str, Any] = {}
+                if isinstance(result.info, dict):
+                    combined_info.update(result.info)
+                data_prop = getattr(result, "data", None)
+                if isinstance(data_prop, dict):
+                    combined_info.update({k: v for k, v in data_prop.items() if k not in combined_info})
+                rois_data = combined_info.get("rois")
                 if isinstance(rois_data, list):
                     rois.clear()
                     for roi in rois_data:
@@ -751,12 +805,10 @@ class AgentOrchestrator:
                         if path:
                             rois.append({**roi, "path": path})
                     continue
-                hits = data.get("hits")
-                if isinstance(hits, list):
-                    for hit in hits:
-                        if not isinstance(hit, RetrievalHit):
-                            continue
-                        node_id = hit.node_id
+                hits_iter = getattr(result, "hits", []) or combined_info.get("hits", []) or []
+                for hit in hits_iter:
+                    node_id = getattr(hit, "node_id", None)
+                    if isinstance(node_id, str):
                         if not _node_matches(node_id):
                             continue
                         _append_node(node_id)
@@ -788,17 +840,23 @@ class AgentOrchestrator:
         call_args: Dict[str, object],
         result: ToolResult,
     ) -> None:
-        data = result.data if isinstance(result.data, dict) else {}
-        answer_text = data.get("answer")
+        combined: Dict[str, Any] = {}
+        if isinstance(result.info, dict):
+            combined.update(result.info)
+        data_prop = getattr(result, "data", None)
+        if isinstance(data_prop, dict):
+            for key, value in data_prop.items():
+                combined.setdefault(key, value)
+        answer_text = combined.get("answer")
         payload = {
             "question": call_args.get("question"),
             "images": call_args.get("images"),
             "vision": {
                 "tool": tool_id,
                 "answer": answer_text,
-                "thinking": data.get("thinking"),
-                "confidence": data.get("confidence"),
-                "details": data.get("details"),
+                "thinking": combined.get("thinking"),
+                "confidence": combined.get("confidence"),
+                "details": combined.get("details"),
             },
         }
         if isinstance(answer_text, str) and answer_text.strip():

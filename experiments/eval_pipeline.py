@@ -28,6 +28,22 @@ DEFAULT_PROMPT = (
 )
 
 
+def render_prompt(template: str, values: Dict[str, str]) -> str:
+    """
+    Format prompt templates while tolerating literal braces in the template.
+
+    Falls back to direct placeholder replacement if str.format fails due to
+    unescaped braces (e.g., JSON examples like {"binary_correctness": 1}).
+    """
+    try:
+        return template.format(**values)
+    except (KeyError, ValueError):
+        prompt = template
+        for key, value in values.items():
+            prompt = prompt.replace(f"{{{key}}}", value)
+        return prompt
+
+
 def parse_list_field(raw: str | None) -> List[str]:
     if not raw:
         return []
@@ -72,7 +88,14 @@ def call_eval_llm(
     prompt_template: str,
     model_name: str,
 ) -> float:
-    prompt = prompt_template.format(question=question, answer=predicted, gt=ground_truth)
+    prompt = render_prompt(
+        prompt_template,
+        {
+            "question": str(question),
+            "answer": str(predicted),
+            "gt": str(ground_truth),
+        },
+    )
     response = client.chat.completions.create(
         model=model_name,
         messages=[{"role": "system", "content": ""}, {"role": "user", "content": prompt}],
